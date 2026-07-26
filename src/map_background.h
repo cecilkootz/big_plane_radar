@@ -15,6 +15,7 @@ public:
         float outerKm,
         int radarRadius,
         const String &apiKey,
+        uint8_t brightnessPercent,
         size_t viewIndex
     );
     bool draw(PanelDisplay::Canvas &canvas, size_t viewIndex);

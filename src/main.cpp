@@ -55,6 +55,8 @@ static constexpr int PANEL_ROW_H = 54;
 static constexpr int AIRCRAFT_LABEL_LINE_ADVANCE = 9;
 static constexpr int AIRCRAFT_LABEL_LINE_HEIGHT = 7;
 static constexpr int AIRCRAFT_LABEL_PADDING = 1;
+static constexpr uint8_t MAP_BRIGHTNESS_MIN = 20;
+static constexpr uint8_t MAP_BRIGHTNESS_DEFAULT = 100;
 static constexpr uint32_t WIFI_CONNECT_ATTEMPT_MS = 15000;
 static constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 12000;
 static constexpr uint32_t ADSB_FETCH_INTERVAL_MS = 5000;
@@ -84,10 +86,15 @@ struct AppConfig {
     double lon = DEFAULT_LON;
     bool miles = false;
     bool showRunways = true;
+    bool showLabelCallsign = true;
+    bool showLabelType = true;
+    bool showLabelAltitude = true;
+    bool showLabelVerticalRate = true;
     MapProvider mapProvider = DEFAULT_MAP_PROVIDER == 1
         ? MapProvider::Stadia
         : MapProvider::None;
     String stadiaApiKey = DEFAULT_STADIA_API_KEY;
+    uint8_t mapBrightness = MAP_BRIGHTNESS_DEFAULT;
     bool configured = false;
 };
 
@@ -414,6 +421,7 @@ static bool preloadMapCache() {
             ranges[i].outerKm,
             RADAR_RADIUS,
             config.stadiaApiKey,
+            config.mapBrightness,
             i
         );
         allLoaded = loaded && allLoaded;
@@ -517,11 +525,19 @@ static void loadConfig() {
     config.lon = prefs.getDouble("lon", DEFAULT_LON);
     config.miles = prefs.getBool("miles", false);
     config.showRunways = prefs.getBool("runways", true);
+    config.showLabelCallsign = prefs.getBool("lblCall", true);
+    config.showLabelType = prefs.getBool("lblType", true);
+    config.showLabelAltitude = prefs.getBool("lblAlt", true);
+    config.showLabelVerticalRate = prefs.getBool("lblVsi", true);
     uint8_t storedMapProvider = prefs.getUChar("map", DEFAULT_MAP_PROVIDER);
     config.mapProvider = storedMapProvider == static_cast<uint8_t>(MapProvider::Stadia)
         ? MapProvider::Stadia
         : MapProvider::None;
     config.stadiaApiKey = prefs.getString("stadiaKey", DEFAULT_STADIA_API_KEY);
+    config.mapBrightness = static_cast<uint8_t>(std::max(
+        static_cast<int>(MAP_BRIGHTNESS_MIN),
+        std::min(100, static_cast<int>(prefs.getUChar("mapBright", MAP_BRIGHTNESS_DEFAULT)))
+    ));
     config.configured = prefs.getBool("configured", config.ssid.length() > 0);
     rangeIndex = std::min<size_t>(prefs.getUChar("range", 1), RANGE_COUNT - 1);
 }
@@ -533,8 +549,13 @@ static void saveConfig() {
     prefs.putDouble("lon", config.lon);
     prefs.putBool("miles", config.miles);
     prefs.putBool("runways", config.showRunways);
+    prefs.putBool("lblCall", config.showLabelCallsign);
+    prefs.putBool("lblType", config.showLabelType);
+    prefs.putBool("lblAlt", config.showLabelAltitude);
+    prefs.putBool("lblVsi", config.showLabelVerticalRate);
     prefs.putUChar("map", static_cast<uint8_t>(config.mapProvider));
     prefs.putString("stadiaKey", config.stadiaApiKey);
+    prefs.putUChar("mapBright", config.mapBrightness);
     prefs.putBool("configured", config.ssid.length() > 0);
     config.configured = config.ssid.length() > 0;
 }
@@ -584,48 +605,93 @@ static void drawDisplayDiagnostics() {
 }
 
 static void handleRoot() {
+    double formLat = config.lat;
+    double formLon = config.lon;
+    bool browserLocationLoaded = false;
+    if (server.hasArg("browser_lat") && server.hasArg("browser_lon")) {
+        double candidateLat = server.arg("browser_lat").toDouble();
+        double candidateLon = server.arg("browser_lon").toDouble();
+        if (candidateLat >= -90.0 && candidateLat <= 90.0 &&
+            candidateLon >= -180.0 && candidateLon <= 180.0) {
+            formLat = candidateLat;
+            formLon = candidateLon;
+            browserLocationLoaded = true;
+        }
+    }
+
     String body;
-    body.reserve(3400);
+    body.reserve(7600);
     body += F("<!doctype html><html><head><meta charset='utf-8'>");
     body += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
     body += F("<title>Plane Radar Setup</title>");
-    body += F("<style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#050805;color:#e8ffe8;margin:24px}label{display:block;margin:14px 0 6px;color:#73ff8a}input,select{width:100%;box-sizing:border-box;padding:10px;background:#111;border:1px solid #295;color:#fff}button{margin-top:18px;padding:12px 18px;background:#19d45a;border:0;color:#001b08;font-weight:700}small{color:#8a9}</style>");
+    body += F("<style>"
+              "*{box-sizing:border-box}body{max-width:720px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#050805;color:#e8ffe8;margin:24px auto;padding:0 18px}"
+              "h1{font-size:28px}h2{font-size:17px;margin:0 0 14px;color:#e8ffe8}section{border-top:1px solid #173c2d;padding:20px 0}"
+              ".field{display:block;margin:12px 0 6px;color:#73ff8a}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.check{display:flex;align-items:center;gap:9px;margin:10px 0;color:#d9f5df}"
+              "input:not([type=checkbox]):not([type=range]),select{width:100%;padding:10px;background:#101512;border:1px solid #295;color:#fff}input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:#19d45a}"
+              "input[type=range]{width:100%;accent-color:#19d45a}.range-row{display:grid;grid-template-columns:1fr 54px;gap:12px;align-items:center}output{color:#73ff8a;text-align:right}"
+              "button{padding:11px 16px;background:#19d45a;border:0;color:#001b08;font-weight:700;cursor:pointer}.secondary{margin-top:12px;background:#163e2d;color:#dfffea}"
+              ".save{margin-top:4px;width:100%}small{display:block;color:#8a9;margin-top:8px;line-height:1.4}a{color:#73ff8a}@media(max-width:520px){.grid{grid-template-columns:1fr}}"
+              "</style>");
     body += F("</head><body><h1>Plane Radar Setup</h1>");
     body += F("<form method='POST' action='/save'>");
-    body += F("<label>Wi-Fi SSID</label><input name='ssid' value='");
+    body += F("<section><h2>Network</h2><label class='field'>Wi-Fi SSID</label><input name='ssid' value='");
     body += htmlEscape(config.ssid);
     body += F("'>");
-    body += F("<label>Wi-Fi password</label><input name='pass' type='password' value='");
+    body += F("<label class='field'>Wi-Fi password</label><input name='pass' type='password' value='");
     body += htmlEscape(config.password);
-    body += F("'>");
-    body += F("<label>Latitude</label><input name='lat' value='");
-    body += String(config.lat, 6);
-    body += F("'>");
-    body += F("<label>Longitude</label><input name='lon' value='");
-    body += String(config.lon, 6);
-    body += F("'>");
-    body += F("<label><input type='checkbox' name='miles' ");
+    body += F("'></section>");
+
+    body += F("<section><h2>Location</h2><div class='grid'><div><label class='field'>Latitude</label><input id='lat' name='lat' type='number' min='-90' max='90' step='0.000001' value='");
+    body += String(formLat, 6);
+    body += F("'></div><div><label class='field'>Longitude</label><input id='lon' name='lon' type='number' min='-180' max='180' step='0.000001' value='");
+    body += String(formLon, 6);
+    body += F("'></div></div><button class='secondary' type='button' onclick='useBrowserLocation()'>Use browser location</button><small id='location-status'>");
+    if (browserLocationLoaded) {
+        body += F("Browser location loaded. Save to apply.");
+    }
+    body += F("</small></section>");
+
+    body += F("<section><h2>Radar</h2><label class='check'><input type='checkbox' name='miles' ");
     if (config.miles) body += F("checked");
-    body += F("> Display distances in miles</label>");
-    body += F("<label><input type='checkbox' name='runways' ");
+    body += F(">Display distances in miles</label>");
+    body += F("<label class='check'><input type='checkbox' name='runways' ");
     if (config.showRunways) body += F("checked");
-    body += F("> Show airports/runways</label>");
-    body += F("<label>Map background</label><select name='map'>");
+    body += F(">Show airports and runways</label></section>");
+
+    body += F("<section><h2>Aircraft labels</h2><label class='check'><input type='checkbox' name='label_callsign' ");
+    if (config.showLabelCallsign) body += F("checked");
+    body += F(">Callsign</label><label class='check'><input type='checkbox' name='label_type' ");
+    if (config.showLabelType) body += F("checked");
+    body += F(">Aircraft type</label><label class='check'><input type='checkbox' name='label_altitude' ");
+    if (config.showLabelAltitude) body += F("checked");
+    body += F(">Altitude</label><label class='check'><input type='checkbox' name='label_vrate' ");
+    if (config.showLabelVerticalRate) body += F("checked");
+    body += F(">Vertical rate</label></section>");
+
+    body += F("<section><h2>Map</h2><label class='field'>Map background</label><select name='map'>");
     body += F("<option value='0'");
     if (config.mapProvider == MapProvider::None) body += F(" selected");
     body += F(">None</option><option value='1'");
     if (config.mapProvider == MapProvider::Stadia) body += F(" selected");
     body += F(">Stadia Alidade Smooth Dark</option></select>");
-    body += F("<label>Stadia Maps API key</label><input name='stadia_key' type='password' value='");
+    body += F("<label class='field'>Map brightness</label><div class='range-row'><input id='map-brightness' name='map_brightness' type='range' min='20' max='100' step='5' value='");
+    body += String(config.mapBrightness);
+    body += F("' oninput=\"document.getElementById('map-brightness-value').value=this.value+'%'\"><output id='map-brightness-value'>");
+    body += String(config.mapBrightness);
+    body += F("%</output></div><label class='field'>Stadia Maps API key</label><input name='stadia_key' type='password' value='");
     body += htmlEscape(config.stadiaApiKey);
     body += F("'>");
-    body += F("<small>The radar continues without a map if this is empty or the map request fails.</small>");
-    body += F("<button type='submit'>Save and reboot</button></form>");
+    body += F("<small>The radar continues without a map if this is empty or the map request fails.</small></section>");
+    body += F("<button class='save' type='submit'>Save and reboot</button></form>");
     body += F("<p><a href='/screenshot.bmp'>Download current screen BMP</a></p>");
     body += F("<p><small>Short tap on radar: range preset. Long press: setup portal. Range is saved.</small></p>");
     body += F("<p><small>Current IP: ");
     body += WiFi.localIP().toString();
     body += F(" AP: 192.168.4.1 Host: plane-radar.local</small></p>");
+    body += F("<script>function useBrowserLocation(){const status=document.getElementById('location-status');"
+              "if(window.isSecureContext&&navigator.geolocation){status.textContent='Locating...';navigator.geolocation.getCurrentPosition(function(p){document.getElementById('lat').value=p.coords.latitude.toFixed(6);document.getElementById('lon').value=p.coords.longitude.toFixed(6);status.textContent='Browser location loaded. Save to apply.'},function(e){status.textContent='Location unavailable: '+e.message},{enableHighAccuracy:true,timeout:15000,maximumAge:60000});return}"
+              "const target=location.origin+'/';location.href='https://k4m454k.github.io/big_plane_radar/location.html?return='+encodeURIComponent(target)};</script>");
     body += F("</body></html>");
     server.send(200, "text/html", body);
 }
@@ -682,10 +748,21 @@ static void handleSave() {
     double lon = server.arg("lon").toDouble();
     bool miles = server.hasArg("miles");
     bool showRunways = server.hasArg("runways");
+    bool showLabelCallsign = server.hasArg("label_callsign");
+    bool showLabelType = server.hasArg("label_type");
+    bool showLabelAltitude = server.hasArg("label_altitude");
+    bool showLabelVerticalRate = server.hasArg("label_vrate");
     MapProvider mapProvider = server.arg("map").toInt() == 1
         ? MapProvider::Stadia
         : MapProvider::None;
     String stadiaApiKey = server.arg("stadia_key");
+    int requestedMapBrightness = server.hasArg("map_brightness")
+        ? server.arg("map_brightness").toInt()
+        : config.mapBrightness;
+    uint8_t mapBrightness = static_cast<uint8_t>(std::max(
+        static_cast<int>(MAP_BRIGHTNESS_MIN),
+        std::min(100, requestedMapBrightness)
+    ));
 
     lockState();
     config.ssid = ssid;
@@ -694,8 +771,13 @@ static void handleSave() {
     config.lon = lon;
     config.miles = miles;
     config.showRunways = showRunways;
+    config.showLabelCallsign = showLabelCallsign;
+    config.showLabelType = showLabelType;
+    config.showLabelAltitude = showLabelAltitude;
+    config.showLabelVerticalRate = showLabelVerticalRate;
     config.mapProvider = mapProvider;
     config.stadiaApiKey = stadiaApiKey;
+    config.mapBrightness = mapBrightness;
     saveConfig();
     unlockState();
     server.send(200, "text/html", "<html><body><h1>Saved</h1><p>Rebooting...</p></body></html>");
@@ -1711,20 +1793,41 @@ static void drawRadar() {
         if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) continue;
         bool labelRight = x < cx;
         int tx = labelRight ? x + 16 : x - 16;
-        int ty = std::max(10, std::min(SCREEN_H - 28, y - 10));
         const char *callsign = renderAircraft[i].callsign[0]
             ? renderAircraft[i].callsign
             : "????";
-        char altitudeLine[32];
-        snprintf(altitudeLine,
-                 sizeof(altitudeLine),
-                 "%s%s%s",
-                 renderAircraft[i].alt,
-                 renderAircraft[i].vsi[0] != '\0' ? " " : "",
-                 renderAircraft[i].vsi);
+        char altitudeLine[32] = {};
+        if (config.showLabelAltitude && renderAircraft[i].alt[0] != '\0') {
+            strlcpy(altitudeLine, renderAircraft[i].alt, sizeof(altitudeLine));
+        }
+        if (config.showLabelVerticalRate && renderAircraft[i].vsi[0] != '\0') {
+            if (altitudeLine[0] != '\0') strlcat(altitudeLine, " ", sizeof(altitudeLine));
+            strlcat(altitudeLine, renderAircraft[i].vsi, sizeof(altitudeLine));
+        }
+
+        struct LabelLine {
+            const char *text;
+            uint16_t color;
+        };
+        LabelLine lines[3];
+        size_t lineCount = 0;
+        if (config.showLabelCallsign) {
+            lines[lineCount++] = LabelLine{callsign, colorText};
+        }
+        if (config.showLabelType && renderAircraft[i].type[0] != '\0') {
+            lines[lineCount++] = LabelLine{renderAircraft[i].type, colorDim};
+        }
+        if (altitudeLine[0] != '\0') {
+            lines[lineCount++] = LabelLine{altitudeLine, colorWarn};
+        }
+        if (lineCount == 0) continue;
+
+        int labelTextHeight = AIRCRAFT_LABEL_LINE_HEIGHT +
+            static_cast<int>(lineCount - 1) * AIRCRAFT_LABEL_LINE_ADVANCE;
+        int maxLabelY = SCREEN_H - labelTextHeight - AIRCRAFT_LABEL_PADDING - 1;
+        int ty = std::max(10, std::min(maxLabelY, y - 10));
 
         auto drawLineBackground = [&](const char *text, int lineY) {
-            if (text == nullptr || text[0] == '\0') return;
             int lineWidth = g.textWidth(text);
             int lineX = labelRight ? tx : tx - lineWidth;
             g.fillRect(
@@ -1736,17 +1839,13 @@ static void drawRadar() {
             );
         };
 
-        drawLineBackground(callsign, ty);
-        drawLineBackground(renderAircraft[i].type, ty + AIRCRAFT_LABEL_LINE_ADVANCE);
-        drawLineBackground(altitudeLine, ty + AIRCRAFT_LABEL_LINE_ADVANCE * 2);
-
         g.setTextDatum(labelRight ? textdatum_t::top_left : textdatum_t::top_right);
-        g.setTextColor(colorText, colorBg);
-        g.drawString(callsign, tx, ty);
-        g.setTextColor(colorDim, colorBg);
-        g.drawString(renderAircraft[i].type, tx, ty + AIRCRAFT_LABEL_LINE_ADVANCE);
-        g.setTextColor(colorWarn, colorBg);
-        g.drawString(altitudeLine, tx, ty + AIRCRAFT_LABEL_LINE_ADVANCE * 2);
+        for (size_t lineIndex = 0; lineIndex < lineCount; lineIndex++) {
+            int lineY = ty + static_cast<int>(lineIndex) * AIRCRAFT_LABEL_LINE_ADVANCE;
+            drawLineBackground(lines[lineIndex].text, lineY);
+            g.setTextColor(lines[lineIndex].color, colorBg);
+            g.drawString(lines[lineIndex].text, tx, lineY);
+        }
     }
 
     drawAircraftList(
@@ -1917,7 +2016,7 @@ void setup() {
                       !config.stadiaApiKey.isEmpty() &&
                       RadarMap::background.begin(PANEL_X, SCREEN_H, RANGE_COUNT);
     setBootStage(BOOT_CONFIG, BootStatus::Ok);
-    Serial.printf("[config] configured=%d ssid_len=%u lat=%.6f lon=%.6f range=%u runways=%d miles=%d map=%u map_key_len=%u\n",
+    Serial.printf("[config] configured=%d ssid_len=%u lat=%.6f lon=%.6f range=%u runways=%d miles=%d map=%u map_brightness=%u map_key_len=%u labels=%d%d%d%d\n",
                   config.configured,
                   static_cast<unsigned>(config.ssid.length()),
                   config.lat,
@@ -1926,7 +2025,12 @@ void setup() {
                   config.showRunways,
                   config.miles,
                   static_cast<unsigned>(config.mapProvider),
-                  static_cast<unsigned>(config.stadiaApiKey.length()));
+                  static_cast<unsigned>(config.mapBrightness),
+                  static_cast<unsigned>(config.stadiaApiKey.length()),
+                  config.showLabelCallsign,
+                  config.showLabelType,
+                  config.showLabelAltitude,
+                  config.showLabelVerticalRate);
     Serial.flush();
 
     if (!config.configured) {

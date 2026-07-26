@@ -31,13 +31,15 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
 ## Features
 
 - first-boot setup portal: `PlaneRadar-Setup`;
-- saved Wi-Fi, radar center, units, runway overlay, and range settings in NVS;
+- saved Wi-Fi, radar center, units, airport overlay, aircraft label, map
+  brightness, and range settings in NVS;
 - ADS-B data from `https://opendata.adsb.fi/api/v3/`;
 - local dead-reckoning between ADS-B updates, redrawn at about `4 FPS`;
 - optional route city line in the aircraft list via cached callsign lookups from
   `https://api.adsbdb.com/`;
 - optional Stadia Maps `Alidade Smooth Dark` raster background, with a complete
   no-map fallback;
+- configurable map brightness from 20% to 100%;
 - all four map ranges are downloaded once during boot and cached in PSRAM, so
   changing radar range performs no additional Stadia request;
 - downloaded maps are bilinearly downsampled to the display for smoother roads
@@ -47,6 +49,8 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
   original circular radar boundary remains unchanged;
 - each aircraft label line has a tightly fitted black backing for readability
   without obscuring unnecessary map area;
+- independently configurable callsign, aircraft type, altitude, and vertical
+  rate label fields; enabled lines automatically close any gaps;
 - rotorcraft symbols rotate as a complete unit with heading, while the tail
   continues to point opposite the direction of travel;
 - background Wi-Fi reconnect after router/power outages;
@@ -69,6 +73,7 @@ Aircraft symbols use ADS-B `category` when it is available.
 ├── big_plane_radar.ino
 ├── build_arduino_cli.sh
 ├── esp_panel_board_custom_conf.h
+├── location.html
 ├── lib/
 │   ├── ArduinoJson/
 │   └── PNGdec/
@@ -240,10 +245,16 @@ After the board joins your Wi-Fi, the setup page is also available at:
 http://plane-radar.local
 ```
 
-Set Wi-Fi, radar center coordinates, units, runway overlay, and optional map
-background there. Select `None` for the original plain radar, or select
-`Stadia Alidade Smooth Dark` and enter a Stadia Maps API key. The board reboots
-after saving.
+Set Wi-Fi, radar center coordinates, units, airport/runway overlay, aircraft
+label fields, map brightness, and optional map background there. Select `None`
+for the original plain radar, or select `Stadia Alidade Smooth Dark` and enter a
+Stadia Maps API key. The board reboots after saving.
+
+`Use browser location` fills the coordinate fields using the browser's precise
+location. Browsers allow geolocation only from a secure context, while the ESP
+setup page is served over local HTTP. The button therefore opens the repository's
+HTTPS `location.html` helper and returns the coordinates to the local setup page;
+GitHub Pages must be enabled for the repository root for this flow to work.
 
 The firmware uses the Stadia Maps Static Maps API and preserves the attribution
 rendered into the returned map image. See the official

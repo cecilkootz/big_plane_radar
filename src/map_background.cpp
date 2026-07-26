@@ -42,6 +42,7 @@ struct DecodeContext {
     int destinationWidth = 0;
     int destinationHeight = 0;
     int nextDestinationY = 0;
+    uint8_t brightnessPercent = 100;
 };
 
 static BilinearSample bilinearSample(
@@ -84,6 +85,15 @@ static uint16_t interpolateRgb565(uint16_t first, uint16_t second, uint16_t weig
     uint32_t blue =
         ((first & 0x1f) * inverseWeight +
          (second & 0x1f) * weight + 128) >> 8;
+    return static_cast<uint16_t>((red << 11) | (green << 5) | blue);
+}
+
+static uint16_t adjustBrightnessRgb565(uint16_t pixel, uint8_t brightnessPercent) {
+    if (brightnessPercent >= 100) return pixel;
+
+    uint32_t red = (((pixel >> 11) & 0x1f) * brightnessPercent + 50) / 100;
+    uint32_t green = (((pixel >> 5) & 0x3f) * brightnessPercent + 50) / 100;
+    uint32_t blue = ((pixel & 0x1f) * brightnessPercent + 50) / 100;
     return static_cast<uint16_t>((red << 11) | (green << 5) | blue);
 }
 
@@ -154,19 +164,22 @@ static int drawPngLine(PNGDRAW *draw) {
                 firstSourceLine[sourceX.second],
                 sourceX.weight
             );
-            if (sourceY.weight == 0) {
-                destinationLine[x] = firstRowPixel;
-                continue;
+            uint16_t destinationPixel = firstRowPixel;
+            if (sourceY.weight != 0) {
+                uint16_t secondRowPixel = interpolateRgb565(
+                    secondSourceLine[sourceX.first],
+                    secondSourceLine[sourceX.second],
+                    sourceX.weight
+                );
+                destinationPixel = interpolateRgb565(
+                    firstRowPixel,
+                    secondRowPixel,
+                    sourceY.weight
+                );
             }
-            uint16_t secondRowPixel = interpolateRgb565(
-                secondSourceLine[sourceX.first],
-                secondSourceLine[sourceX.second],
-                sourceX.weight
-            );
-            destinationLine[x] = interpolateRgb565(
-                firstRowPixel,
-                secondRowPixel,
-                sourceY.weight
+            destinationLine[x] = adjustBrightnessRgb565(
+                destinationPixel,
+                context->brightnessPercent
             );
         }
         context->nextDestinationY++;
@@ -232,7 +245,8 @@ static bool decodePng(
     int destinationWidth,
     int destinationHeight,
     int expectedSourceWidth,
-    int expectedSourceHeight
+    int expectedSourceHeight,
+    uint8_t brightnessPercent
 ) {
     void *decoderStorage = heap_caps_calloc(
         1,
@@ -272,6 +286,7 @@ static bool decodePng(
     context.sourceHeight = expectedSourceHeight;
     context.destinationWidth = destinationWidth;
     context.destinationHeight = destinationHeight;
+    context.brightnessPercent = static_cast<uint8_t>(std::min(100, static_cast<int>(brightnessPercent)));
     for (int x = 0; x < destinationWidth; x++) {
         context.sourceX[x] = bilinearSample(
             x,
@@ -354,6 +369,7 @@ bool Background::fetchStadia(
     float outerKm,
     int radarRadius,
     const String &apiKey,
+    uint8_t brightnessPercent,
     size_t viewIndex
 ) {
     if (viewIndex >= _viewCount || _buffers[viewIndex] == nullptr || apiKey.isEmpty()) {
@@ -426,7 +442,8 @@ bool Background::fetchStadia(
         _width,
         _height,
         geometry.sourceWidth,
-        geometry.sourceHeight
+        geometry.sourceHeight,
+        brightnessPercent
     );
     heap_caps_free(pngData);
     if (!decoded) return false;
