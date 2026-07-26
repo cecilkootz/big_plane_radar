@@ -45,6 +45,10 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
 - with a map loaded, aircraft use the full rectangular map viewport and
   out-of-view targets become direction dots on its edge; without a map, the
   original circular radar boundary remains unchanged;
+- each aircraft label line has a tightly fitted black backing for readability
+  without obscuring unnecessary map area;
+- rotorcraft symbols rotate as a complete unit with heading, while the tail
+  continues to point opposite the direction of travel;
 - background Wi-Fi reconnect after router/power outages;
 - touch controls: short tap cycles range, long press starts the setup portal;
 - boot setup window: hold the screen during startup to force the setup portal;

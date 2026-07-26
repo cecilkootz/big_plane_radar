@@ -52,6 +52,9 @@ static constexpr int PANEL_TEXT_X = PANEL_X + 42;
 static constexpr int PANEL_RIGHT = SCREEN_W - 10;
 static constexpr int PANEL_LIST_TOP = 42;
 static constexpr int PANEL_ROW_H = 54;
+static constexpr int AIRCRAFT_LABEL_LINE_ADVANCE = 9;
+static constexpr int AIRCRAFT_LABEL_LINE_HEIGHT = 7;
+static constexpr int AIRCRAFT_LABEL_PADDING = 1;
 static constexpr uint32_t WIFI_CONNECT_ATTEMPT_MS = 15000;
 static constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 12000;
 static constexpr uint32_t ADSB_FETCH_INTERVAL_MS = 5000;
@@ -1468,12 +1471,26 @@ static void drawPlane(Gfx &g, int cx, int cy, float headingDeg, uint8_t sizeClas
 template <typename Gfx>
 static void drawAircraftSymbol(Gfx &g, const Aircraft &item, int cx, int cy) {
     if (isRotorcraft(item)) {
-        g.drawWideLine(cx - 3, cy - 3, cx + 3, cy + 3, 2.0f, colorPlane);
-        g.drawWideLine(cx - 3, cy + 3, cx + 3, cy - 3, 2.0f, colorPlane);
-
         float rad = item.noseDeg * DEG_TO_RAD;
-        int tailX = cx - lroundf(sinf(rad) * 7);
-        int tailY = cy + lroundf(cosf(rad) * 7);
+        float s = sinf(rad);
+        float c = cosf(rad);
+        int rotor1X = lroundf((s + c) * 3);
+        int rotor1Y = lroundf((s - c) * 3);
+        int rotor2X = lroundf((s - c) * 3);
+        int rotor2Y = -lroundf((s + c) * 3);
+        g.drawWideLine(
+            cx - rotor1X, cy - rotor1Y,
+            cx + rotor1X, cy + rotor1Y,
+            2.0f, colorPlane
+        );
+        g.drawWideLine(
+            cx - rotor2X, cy - rotor2Y,
+            cx + rotor2X, cy + rotor2Y,
+            2.0f, colorPlane
+        );
+
+        int tailX = cx - lroundf(s * 7);
+        int tailY = cy + lroundf(c * 7);
         g.drawWideLine(cx, cy, tailX, tailY, 2.0f, colorPlane);
         return;
     }
@@ -1695,12 +1712,9 @@ static void drawRadar() {
         bool labelRight = x < cx;
         int tx = labelRight ? x + 16 : x - 16;
         int ty = std::max(10, std::min(SCREEN_H - 28, y - 10));
-        g.setTextDatum(labelRight ? textdatum_t::top_left : textdatum_t::top_right);
-        g.setTextColor(colorText, colorBg);
-        g.drawString(renderAircraft[i].callsign[0] ? renderAircraft[i].callsign : "????", tx, ty);
-        g.setTextColor(colorDim, colorBg);
-        g.drawString(renderAircraft[i].type, tx, ty + 9);
-        g.setTextColor(colorWarn, colorBg);
+        const char *callsign = renderAircraft[i].callsign[0]
+            ? renderAircraft[i].callsign
+            : "????";
         char altitudeLine[32];
         snprintf(altitudeLine,
                  sizeof(altitudeLine),
@@ -1708,7 +1722,31 @@ static void drawRadar() {
                  renderAircraft[i].alt,
                  renderAircraft[i].vsi[0] != '\0' ? " " : "",
                  renderAircraft[i].vsi);
-        g.drawString(altitudeLine, tx, ty + 18);
+
+        auto drawLineBackground = [&](const char *text, int lineY) {
+            if (text == nullptr || text[0] == '\0') return;
+            int lineWidth = g.textWidth(text);
+            int lineX = labelRight ? tx : tx - lineWidth;
+            g.fillRect(
+                lineX - AIRCRAFT_LABEL_PADDING,
+                lineY - AIRCRAFT_LABEL_PADDING,
+                lineWidth + AIRCRAFT_LABEL_PADDING * 2,
+                AIRCRAFT_LABEL_LINE_HEIGHT + AIRCRAFT_LABEL_PADDING * 2,
+                colorBg
+            );
+        };
+
+        drawLineBackground(callsign, ty);
+        drawLineBackground(renderAircraft[i].type, ty + AIRCRAFT_LABEL_LINE_ADVANCE);
+        drawLineBackground(altitudeLine, ty + AIRCRAFT_LABEL_LINE_ADVANCE * 2);
+
+        g.setTextDatum(labelRight ? textdatum_t::top_left : textdatum_t::top_right);
+        g.setTextColor(colorText, colorBg);
+        g.drawString(callsign, tx, ty);
+        g.setTextColor(colorDim, colorBg);
+        g.drawString(renderAircraft[i].type, tx, ty + AIRCRAFT_LABEL_LINE_ADVANCE);
+        g.setTextColor(colorWarn, colorBg);
+        g.drawString(altitudeLine, tx, ty + AIRCRAFT_LABEL_LINE_ADVANCE * 2);
     }
 
     drawAircraftList(
