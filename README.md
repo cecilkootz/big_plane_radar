@@ -47,9 +47,9 @@ they do not provide the required Web Serial support.
    `USB Serial`, `CH343`, `wchusbserial`, or similar.
 4. Confirm the installation and wait until it reaches 100%. Do not disconnect
    the cable during flashing.
-5. On the first installation, allow the installer to erase the device if it
-   asks. For a later firmware update, leave erase disabled to preserve the
-   saved settings.
+5. Allow the installer to erase the device if it asks. The current installer
+   writes a complete 16 MB merged image, so treat browser installation as a
+   full reflash: saved Wi-Fi and radar settings may need to be entered again.
 6. If the display does not restart automatically, press its `RESET` button once.
 
 ### 3. Prepare a map key (optional)
