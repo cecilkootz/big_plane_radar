@@ -11,6 +11,7 @@
 #include <esp_heap_caps.h>
 #include <math.h>
 
+#include "aircraft_icons.h"
 #include "airports.h"
 #include "airports_iata.h"
 #include "map_background.h"
@@ -38,6 +39,11 @@
 enum class MapProvider : uint8_t {
     None = 0,
     Stadia = 1,
+};
+
+enum class AircraftSymbolStyle : uint8_t {
+    DetailedIcons = 0,
+    Classic = 1,
 };
 
 static constexpr int SCREEN_W = 800;
@@ -90,6 +96,7 @@ struct AppConfig {
     bool showLabelType = true;
     bool showLabelAltitude = true;
     bool showLabelVerticalRate = true;
+    AircraftSymbolStyle aircraftSymbolStyle = AircraftSymbolStyle::DetailedIcons;
     MapProvider mapProvider = DEFAULT_MAP_PROVIDER == 1
         ? MapProvider::Stadia
         : MapProvider::None;
@@ -529,6 +536,10 @@ static void loadConfig() {
     config.showLabelType = prefs.getBool("lblType", true);
     config.showLabelAltitude = prefs.getBool("lblAlt", true);
     config.showLabelVerticalRate = prefs.getBool("lblVsi", true);
+    config.aircraftSymbolStyle = prefs.getUChar("symbols", 0) ==
+            static_cast<uint8_t>(AircraftSymbolStyle::Classic)
+        ? AircraftSymbolStyle::Classic
+        : AircraftSymbolStyle::DetailedIcons;
     uint8_t storedMapProvider = prefs.getUChar("map", DEFAULT_MAP_PROVIDER);
     config.mapProvider = storedMapProvider == static_cast<uint8_t>(MapProvider::Stadia)
         ? MapProvider::Stadia
@@ -553,6 +564,7 @@ static void saveConfig() {
     prefs.putBool("lblType", config.showLabelType);
     prefs.putBool("lblAlt", config.showLabelAltitude);
     prefs.putBool("lblVsi", config.showLabelVerticalRate);
+    prefs.putUChar("symbols", static_cast<uint8_t>(config.aircraftSymbolStyle));
     prefs.putUChar("map", static_cast<uint8_t>(config.mapProvider));
     prefs.putString("stadiaKey", config.stadiaApiKey);
     prefs.putUChar("mapBright", config.mapBrightness);
@@ -620,7 +632,7 @@ static void handleRoot() {
     }
 
     String body;
-    body.reserve(7600);
+    body.reserve(11000);
     body += F("<!doctype html><html><head><meta charset='utf-8'>");
     body += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
     body += F("<title>Plane Radar Setup</title>");
@@ -628,10 +640,11 @@ static void handleRoot() {
               "*{box-sizing:border-box}body{max-width:720px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#050805;color:#e8ffe8;margin:24px auto;padding:0 18px}"
               "h1{font-size:28px}h2{font-size:17px;margin:0 0 14px;color:#e8ffe8}section{border-top:1px solid #173c2d;padding:20px 0}"
               ".field{display:block;margin:12px 0 6px;color:#73ff8a}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.check{display:flex;align-items:center;gap:9px;margin:10px 0;color:#d9f5df}"
-              "input:not([type=checkbox]):not([type=range]),select{width:100%;padding:10px;background:#101512;border:1px solid #295;color:#fff}input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:#19d45a}"
-              "input[type=range]{width:100%;accent-color:#19d45a}.range-row{display:grid;grid-template-columns:1fr 54px;gap:12px;align-items:center}output{color:#73ff8a;text-align:right}"
+              "input:not([type=checkbox]):not([type=range]):not([type=radio]),select{width:100%;padding:10px;background:#101512;border:1px solid #295;color:#fff}input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:#19d45a}"
+              "input[type=range]{width:100%;min-width:0;accent-color:#19d45a}.range-row{display:grid;grid-template-columns:minmax(0,1fr) 54px;gap:12px;align-items:center}output{color:#73ff8a;text-align:right}"
+              ".symbol-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.symbol-choice{position:relative;cursor:pointer}.symbol-choice>input{position:absolute;opacity:0;pointer-events:none}.symbol-card{display:block;border:1px solid #295;background:#101512;padding:10px;text-align:center}.symbol-choice>input:checked+.symbol-card{border-color:#19d45a;background:#0c2118;box-shadow:inset 0 0 0 1px #19d45a}.symbol-preview{height:62px;display:flex;align-items:center;justify-content:center;gap:20px;background:#020807;border:1px solid #173c2d;margin-bottom:9px}.symbol-preview img{width:40px;height:40px;object-fit:contain}.symbol-title{display:block;color:#dfffea;font-weight:700}.classic-plane{width:0;height:0;border-left:9px solid transparent;border-right:9px solid transparent;border-bottom:27px solid #ff3750}.classic-heli{position:relative;width:28px;height:28px}.classic-heli:before,.classic-heli:after{content:'';position:absolute;left:2px;top:12px;width:24px;height:3px;background:#ff3750;transform:rotate(45deg)}.classic-heli:after{transform:rotate(-45deg)}.classic-heli i{position:absolute;left:13px;top:13px;width:3px;height:14px;background:#ff3750}"
               "button{padding:11px 16px;background:#19d45a;border:0;color:#001b08;font-weight:700;cursor:pointer}.secondary{margin-top:12px;background:#163e2d;color:#dfffea}"
-              ".save{margin-top:4px;width:100%}small{display:block;color:#8a9;margin-top:8px;line-height:1.4}a{color:#73ff8a}@media(max-width:520px){.grid{grid-template-columns:1fr}}"
+              ".save{margin-top:4px;width:100%}small{display:block;color:#8a9;margin-top:8px;line-height:1.4}a{color:#73ff8a}@media(max-width:520px){.grid,.symbol-picker{grid-template-columns:1fr}}"
               "</style>");
     body += F("</head><body><h1>Plane Radar Setup</h1>");
     body += F("<form method='POST' action='/save'>");
@@ -658,6 +671,12 @@ static void handleRoot() {
     body += F("<label class='check'><input type='checkbox' name='runways' ");
     if (config.showRunways) body += F("checked");
     body += F(">Show airports and runways</label></section>");
+
+    body += F("<section><h2>Aircraft symbols</h2><div class='symbol-picker'><label class='symbol-choice'><input type='radio' name='symbol_style' value='0' ");
+    if (config.aircraftSymbolStyle == AircraftSymbolStyle::DetailedIcons) body += F("checked");
+    body += F("><span class='symbol-card'><span class='symbol-preview'><img alt='' src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAAACXBIWXMAAAO+AAAD2QDe9o6lAAABO0lEQVR4nO3TLUgDYRzH8Uc5RRFkYriiDBSDYcVisKhBEHzBgVgsYrdsbcU6Ed+iyWDzDXHJ4EsxajUYdE1W1hac0++f5zl8GOzuHg+bf/iw3e253/Psf8/T9vUyoyKqH0+oYBz1sMFeVBo1hEGjzwQnCnSq/8C/D+zCinW9igN8/iZwHntKb5ugdrCGDdzFDRzBPmZbTJTBLU6QR7lVYA8KyKEzZOVBLWMORWyhZgdKn7YxECPIrm5sKt0GWciZBN5gqmlgAw84x6P66dckxrCECbSb+2mcSpZnhX2YcAm5xLs1OKg33GMXPhaRxTQ65FMCL0xICVWHvysTHhoppfuZ9cwMSUsWcizinBS/6ftr2OCoQGn+kXV9jXWlX4Bz4LDSvbWrV+kNPYpn10D5TbbMlSFbSY7jQthz3ys1OKWfIyQTAAAAAElFTkSuQmCC'><img alt='' src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAAACXBIWXMAAAAAAAAAAQCEeRdzAAABiUlEQVR4nL3USyhEURzH8TseMSk7Sqxkb2Fn4ZGwt7ERRWFDeZSUJMqClEcWpIQsJsXCwoIpirIjYoOlyMirSIwZ33/33DqOe8eY5F+f7tz/Oed3Z073jC96XmX9ZaVon8vwiINfrC/AMhpxogf6MKImVGihqRhCDpKwiUU1loUNtfbJ/IZRVGMNQS20C+vYU/PkvhiHqh9GOa7dfvI9ZEPntNBMLUxqEr3ogR+luNH3QA+UekM9BrCFVWP8HU0qRB54a4x/C3RKAi8wg1pj7AyVeHBb6BUotWTZe1Zo9INeYT8FJlT/Gijvl9+ln5xIoIRNI99lrAXblv0exh04gRoUYQolqj+OHaygHbPxBI6h2bLP9hFacYordKg5DZZ9hvPQHytwFJ2ow77qhYyrVADpmEeuZW9D2AwcRDeG1dOdukPECJRaUFcJfUGbGXhp2Uetz1gYUaFmoBP6il2noQfKMZM/hqjLwpBHoFRAvzH38MNlQZrqhz0Cv1Q8J0VemWNkIwPPsSZ/AhWIV5DszxqhAAAAAElFTkSuQmCC'></span><span class='symbol-title'>Detailed icons</span></span></label><label class='symbol-choice'><input type='radio' name='symbol_style' value='1' ");
+    if (config.aircraftSymbolStyle == AircraftSymbolStyle::Classic) body += F("checked");
+    body += F("><span class='symbol-card'><span class='symbol-preview'><span class='classic-plane'></span><span class='classic-heli'><i></i></span></span><span class='symbol-title'>Classic symbols</span></span></label></div></section>");
 
     body += F("<section><h2>Aircraft labels</h2><label class='check'><input type='checkbox' name='label_callsign' ");
     if (config.showLabelCallsign) body += F("checked");
@@ -752,6 +771,10 @@ static void handleSave() {
     bool showLabelType = server.hasArg("label_type");
     bool showLabelAltitude = server.hasArg("label_altitude");
     bool showLabelVerticalRate = server.hasArg("label_vrate");
+    AircraftSymbolStyle aircraftSymbolStyle = server.arg("symbol_style").toInt() ==
+            static_cast<int>(AircraftSymbolStyle::Classic)
+        ? AircraftSymbolStyle::Classic
+        : AircraftSymbolStyle::DetailedIcons;
     MapProvider mapProvider = server.arg("map").toInt() == 1
         ? MapProvider::Stadia
         : MapProvider::None;
@@ -775,6 +798,7 @@ static void handleSave() {
     config.showLabelType = showLabelType;
     config.showLabelAltitude = showLabelAltitude;
     config.showLabelVerticalRate = showLabelVerticalRate;
+    config.aircraftSymbolStyle = aircraftSymbolStyle;
     config.mapProvider = mapProvider;
     config.stadiaApiKey = stadiaApiKey;
     config.mapBrightness = mapBrightness;
@@ -1552,6 +1576,18 @@ static void drawPlane(Gfx &g, int cx, int cy, float headingDeg, uint8_t sizeClas
 
 template <typename Gfx>
 static void drawAircraftSymbol(Gfx &g, const Aircraft &item, int cx, int cy) {
+    if (config.aircraftSymbolStyle == AircraftSymbolStyle::DetailedIcons) {
+        AircraftIcons::draw(
+            g,
+            isRotorcraft(item),
+            planeSizeClass(item),
+            item.noseDeg,
+            cx,
+            cy,
+            colorWarn
+        );
+        return;
+    }
     if (isRotorcraft(item)) {
         float rad = item.noseDeg * DEG_TO_RAD;
         float s = sinf(rad);
@@ -1792,7 +1828,14 @@ static void drawRadar() {
         int y = renderAircraft[i].screenY;
         if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) continue;
         bool labelRight = x < cx;
-        int tx = labelRight ? x + 16 : x - 16;
+        int labelOffset = 16;
+        if (config.aircraftSymbolStyle == AircraftSymbolStyle::DetailedIcons) {
+            labelOffset = AircraftIcons::halfExtent(
+                isRotorcraft(renderAircraft[i]),
+                planeSizeClass(renderAircraft[i])
+            ) + 3;
+        }
+        int tx = labelRight ? x + labelOffset : x - labelOffset;
         const char *callsign = renderAircraft[i].callsign[0]
             ? renderAircraft[i].callsign
             : "????";
@@ -2016,7 +2059,7 @@ void setup() {
                       !config.stadiaApiKey.isEmpty() &&
                       RadarMap::background.begin(PANEL_X, SCREEN_H, RANGE_COUNT);
     setBootStage(BOOT_CONFIG, BootStatus::Ok);
-    Serial.printf("[config] configured=%d ssid_len=%u lat=%.6f lon=%.6f range=%u runways=%d miles=%d map=%u map_brightness=%u map_key_len=%u labels=%d%d%d%d\n",
+    Serial.printf("[config] configured=%d ssid_len=%u lat=%.6f lon=%.6f range=%u runways=%d miles=%d map=%u map_brightness=%u map_key_len=%u labels=%d%d%d%d symbols=%u\n",
                   config.configured,
                   static_cast<unsigned>(config.ssid.length()),
                   config.lat,
@@ -2030,7 +2073,8 @@ void setup() {
                   config.showLabelCallsign,
                   config.showLabelType,
                   config.showLabelAltitude,
-                  config.showLabelVerticalRate);
+                  config.showLabelVerticalRate,
+                  static_cast<unsigned>(config.aircraftSymbolStyle));
     Serial.flush();
 
     if (!config.configured) {

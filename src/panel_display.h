@@ -37,6 +37,14 @@ public:
     void fillSmoothCircle(int x0, int y0, int r, uint16_t color);
     void fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color);
     void blitRGB565(int x, int y, int w, int h, const uint16_t *pixels, int stride);
+    void blendAlphaMask4(
+        int x,
+        int y,
+        int w,
+        int h,
+        const uint8_t *packedAlpha,
+        uint16_t color
+    );
 
     void setTextSize(uint8_t size);
     void setTextColor(uint16_t fg);

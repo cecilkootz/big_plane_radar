@@ -6,6 +6,7 @@
 #include <esp_display_panel.hpp>
 #include <esp_heap_caps.h>
 #include <math.h>
+#include <pgmspace.h>
 
 using namespace esp_panel::board;
 using namespace esp_panel::drivers;
@@ -407,6 +408,56 @@ void Canvas::blitRGB565(int x, int y, int w, int h, const uint16_t *pixels, int 
         const uint16_t *src = pixels + static_cast<size_t>(srcY + row) * stride + srcX;
         uint16_t *dst = _fb + static_cast<size_t>(y + row) * WIDTH + x;
         memcpy(dst, src, static_cast<size_t>(w) * sizeof(uint16_t));
+    }
+}
+
+void Canvas::blendAlphaMask4(
+    int x,
+    int y,
+    int w,
+    int h,
+    const uint8_t *packedAlpha,
+    uint16_t color
+) {
+    if (_fb == nullptr || packedAlpha == nullptr || w <= 0 || h <= 0) return;
+
+    int sourceX = std::max(0, -x);
+    int sourceY = std::max(0, -y);
+    int destinationX = std::max(0, x);
+    int destinationY = std::max(0, y);
+    int drawWidth = std::min(w - sourceX, WIDTH - destinationX);
+    int drawHeight = std::min(h - sourceY, HEIGHT - destinationY);
+    if (drawWidth <= 0 || drawHeight <= 0) return;
+
+    uint16_t sourceRed = (color >> 11) & 0x1f;
+    uint16_t sourceGreen = (color >> 5) & 0x3f;
+    uint16_t sourceBlue = color & 0x1f;
+    for (int row = 0; row < drawHeight; row++) {
+        uint16_t *destination = _fb +
+            static_cast<size_t>(destinationY + row) * WIDTH + destinationX;
+        size_t sourcePixel = static_cast<size_t>(sourceY + row) * w + sourceX;
+        for (int column = 0; column < drawWidth; column++, sourcePixel++) {
+            uint8_t packed = pgm_read_byte(packedAlpha + (sourcePixel >> 1));
+            uint8_t alpha = (sourcePixel & 1) ? (packed & 0x0f) : (packed >> 4);
+            if (alpha == 0) continue;
+            if (alpha == 15) {
+                destination[column] = color;
+                continue;
+            }
+
+            uint16_t background = destination[column];
+            uint16_t inverseAlpha = 15 - alpha;
+            uint16_t red = (
+                sourceRed * alpha + ((background >> 11) & 0x1f) * inverseAlpha + 7
+            ) / 15;
+            uint16_t green = (
+                sourceGreen * alpha + ((background >> 5) & 0x3f) * inverseAlpha + 7
+            ) / 15;
+            uint16_t blue = (
+                sourceBlue * alpha + (background & 0x1f) * inverseAlpha + 7
+            ) / 15;
+            destination[column] = static_cast<uint16_t>((red << 11) | (green << 5) | blue);
+        }
     }
 }
 

@@ -31,8 +31,8 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
 ## Features
 
 - first-boot setup portal: `PlaneRadar-Setup`;
-- saved Wi-Fi, radar center, units, airport overlay, aircraft label, map
-  brightness, and range settings in NVS;
+- saved Wi-Fi, radar center, units, airport overlay, aircraft symbol style,
+  aircraft label, map brightness, and range settings in NVS;
 - ADS-B data from `https://opendata.adsb.fi/api/v3/`;
 - local dead-reckoning between ADS-B updates, redrawn at about `4 FPS`;
 - optional route city line in the aircraft list via cached callsign lookups from
@@ -51,8 +51,11 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
   without obscuring unnecessary map area;
 - independently configurable callsign, aircraft type, altitude, and vertical
   rate label fields; enabled lines automatically close any gaps;
-- rotorcraft symbols rotate as a complete unit with heading, while the tail
-  continues to point opposite the direction of travel;
+- selectable anti-aliased detailed aircraft icons or the original classic
+  triangle and rotorcraft symbols, with visual previews in the setup page;
+- detailed icons are used consistently on the map and in the aircraft list;
+  their 5-degree rotation frames are precomputed in flash and alpha-blended
+  directly into the RGB565 framebuffer;
 - background Wi-Fi reconnect after router/power outages;
 - touch controls: short tap cycles range, long press starts the setup portal;
 - boot setup window: hold the screen during startup to force the setup portal;
@@ -62,7 +65,9 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
 
 ## Symbol Legend
 
-Aircraft symbols use ADS-B `category` when it is available.
+Aircraft symbols use ADS-B `category` when it is available. Detailed and classic
+modes share the same three aircraft size classes and rotorcraft detection. The
+legend below compares both styles.
 
 ![Aircraft symbol legend](docs/aircraft-symbol-legend.svg)
 
@@ -70,6 +75,8 @@ Aircraft symbols use ADS-B `category` when it is available.
 
 ```text
 .
+├── assets/
+│   └── icons/
 ├── big_plane_radar.ino
 ├── build_arduino_cli.sh
 ├── esp_panel_board_custom_conf.h
@@ -79,8 +86,13 @@ Aircraft symbols use ADS-B `category` when it is available.
 │   └── PNGdec/
 ├── releases/
 ├── scripts/
-│   └── build_iata_airports.py
+│   ├── build_aircraft_icons.py
+│   ├── build_iata_airports.py
+│   └── build_large_airports.py
 ├── src/
+│   ├── aircraft_icon_data.inc
+│   ├── aircraft_icons.cpp
+│   ├── aircraft_icons.h
 │   ├── airports.h
 │   ├── airports_iata.h
 │   ├── map_background.cpp
@@ -94,6 +106,14 @@ Aircraft symbols use ADS-B `category` when it is available.
 
 `vendor/waveshare-libraries` contains only the Arduino libraries required by this
 firmware: `ESP32_Display_Panel`, `ESP32_IO_Expander`, and `esp-lib-utils`.
+
+The generated aircraft icon atlas is committed, so a normal firmware build does
+not require Pillow. Rebuilding it after changing the source PNG files requires
+Pillow (`python3 -m pip install Pillow`):
+
+```sh
+python3 scripts/build_aircraft_icons.py
+```
 
 ## Install Tools
 
@@ -246,9 +266,10 @@ http://plane-radar.local
 ```
 
 Set Wi-Fi, radar center coordinates, units, airport/runway overlay, aircraft
-label fields, map brightness, and optional map background there. Select `None`
-for the original plain radar, or select `Stadia Alidade Smooth Dark` and enter a
-Stadia Maps API key. The board reboots after saving.
+symbol style and label fields, map brightness, and optional map background
+there. The symbol selector previews both detailed icons and classic symbols.
+Select `None` for the original plain radar, or select `Stadia Alidade Smooth
+Dark` and enter a Stadia Maps API key. The board reboots after saving.
 
 `Use browser location` fills the coordinate fields using the browser's precise
 location. Browsers allow geolocation only from a secure context, while the ESP
