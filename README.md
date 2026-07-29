@@ -33,13 +33,15 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
 - first-boot setup portal: `PlaneRadar-Setup`;
 - saved Wi-Fi, radar center, units, airport overlay, aircraft symbol style,
   aircraft label, map brightness, and range settings in NVS;
+- automatic selection of the nearest one to three medium/large airports and all
+  their physical runways;
 - ADS-B data from `https://opendata.adsb.fi/api/v3/`;
 - local dead-reckoning between 5-second ADS-B updates, redrawn continuously;
 - up to 10 minutes of confirmed positions are retained per aircraft in PSRAM;
   tap an aircraft row to toggle its track, while the extrapolated final segment
   remains temporary and is never committed to history;
-- optional route city line in the aircraft list via cached callsign lookups from
-  `https://api.adsbdb.com/`;
+- optional route city line populated dynamically from cached callsign lookups at
+  `https://api.adsbdb.com/`; no global city table is embedded in the firmware;
 - optional Stadia Maps `Alidade Smooth Dark` raster background, with a complete
   no-map fallback;
 - configurable map brightness from 20% to 100%;
@@ -91,14 +93,12 @@ legend below compares both styles.
 ├── releases/
 ├── scripts/
 │   ├── build_aircraft_icons.py
-│   ├── build_iata_airports.py
-│   └── build_large_airports.py
+│   └── update_airport_data.py
 ├── src/
 │   ├── aircraft_icon_data.inc
 │   ├── aircraft_icons.cpp
 │   ├── aircraft_icons.h
-│   ├── airports.h
-│   ├── airports_iata.h
+│   ├── airport_catalog.h
 │   ├── map_background.cpp
 │   ├── map_background.h
 │   ├── main.cpp
@@ -118,6 +118,16 @@ Pillow (`python3 -m pip install Pillow`):
 ```sh
 python3 scripts/build_aircraft_icons.py
 ```
+
+## Airport Data
+
+The generated catalog contains only airports and runways. Route cities come
+dynamically from ADSBdb and are cached in RAM, while the setup page selects only
+the nearest one to three airports for map rendering. Users do not need to
+generate data manually.
+
+See the complete [airport data and generation guide](docs/AIRPORT_DATA.md).
+[Russian version](docs/AIRPORT_DATA.ru.md).
 
 ## Install Tools
 
@@ -269,9 +279,10 @@ After the board joins your Wi-Fi, the setup page is also available at:
 http://plane-radar.local
 ```
 
-Set Wi-Fi, radar center coordinates, units, airport/runway overlay, aircraft
-symbol style and label fields, map brightness, and optional map background
-there. The symbol selector previews both detailed icons and classic symbols.
+Set Wi-Fi, radar center coordinates, units, automatic or manual airport/runway
+selection, aircraft symbol style and label fields, map brightness, and optional
+map background there. The symbol selector previews both detailed icons and
+classic symbols.
 Select `None` for the original plain radar, or select `Stadia Alidade Smooth
 Dark` and enter a Stadia Maps API key. The board reboots after saving.
 

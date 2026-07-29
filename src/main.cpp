@@ -12,8 +12,7 @@
 #include <math.h>
 
 #include "aircraft_icons.h"
-#include "airports.h"
-#include "airports_iata.h"
+#include "airport_catalog.h"
 #include "map_background.h"
 #include "panel_display.h"
 
@@ -46,6 +45,11 @@ enum class AircraftSymbolStyle : uint8_t {
     Classic = 1,
 };
 
+enum class AirportSelectionMode : uint8_t {
+    Automatic = 0,
+    Manual = 1,
+};
+
 static constexpr int SCREEN_W = 800;
 static constexpr int SCREEN_H = 480;
 static constexpr int RADAR_CX = 260;
@@ -65,6 +69,11 @@ static constexpr int AIRCRAFT_LABEL_LINE_HEIGHT = 7;
 static constexpr int AIRCRAFT_LABEL_PADDING = 1;
 static constexpr uint8_t MAP_BRIGHTNESS_MIN = 20;
 static constexpr uint8_t MAP_BRIGHTNESS_DEFAULT = 100;
+static constexpr uint8_t AIRPORT_COUNT_DEFAULT = 1;
+static constexpr uint8_t AIRPORT_COUNT_MAX = 3;
+static constexpr uint16_t AIRPORT_RADIUS_DEFAULT_KM = 100;
+static constexpr uint16_t AIRPORT_RADIUS_MIN_KM = 10;
+static constexpr uint16_t AIRPORT_RADIUS_MAX_KM = 500;
 static constexpr uint32_t WIFI_CONNECT_ATTEMPT_MS = 15000;
 static constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 12000;
 static constexpr uint32_t ADSB_FETCH_INTERVAL_MS = 5000;
@@ -89,6 +98,9 @@ static constexpr float KM_PER_NM = 1.852f;
 static constexpr float KM_PER_DEG = 111.0f;
 static constexpr size_t MAX_AIRCRAFT = 64;
 static constexpr size_t MAX_ROUTE_CACHE = 40;
+static constexpr size_t MAX_AIRPORT_CITY_CACHE = 128;
+static constexpr size_t ROUTE_CITY_MAX_LEN = 48;
+static constexpr size_t ROUTE_CITY_MIN_PREFIX = 3;
 
 static auto &screen = PanelDisplay::screen;
 static WebServer server(80);
@@ -101,6 +113,10 @@ struct AppConfig {
     double lon = DEFAULT_LON;
     bool miles = false;
     bool showRunways = true;
+    AirportSelectionMode airportSelectionMode = AirportSelectionMode::Automatic;
+    uint8_t airportCount = AIRPORT_COUNT_DEFAULT;
+    uint16_t airportRadiusKm = AIRPORT_RADIUS_DEFAULT_KM;
+    String manualAirportIcao;
     bool showLabelCallsign = true;
     bool showLabelType = true;
     bool showLabelAltitude = true;
@@ -138,6 +154,11 @@ struct Aircraft {
     bool hasFlight = false;
 };
 
+struct SelectedAirport {
+    const AirportCatalogEntry *airport = nullptr;
+    float distanceKm = 0;
+};
+
 struct TrackPoint {
     float lat = 0;
     float lon = 0;
@@ -157,6 +178,8 @@ struct RouteCacheEntry {
     char callsign[10] = {};
     char originIata[4] = {};
     char destinationIata[4] = {};
+    char originCity[ROUTE_CITY_MAX_LEN] = {};
+    char destinationCity[ROUTE_CITY_MAX_LEN] = {};
     uint32_t lastSeenMs = 0;
     uint32_t lastLookupMs = 0;
     bool active = false;
@@ -164,9 +187,19 @@ struct RouteCacheEntry {
     bool lookupDone = false;
 };
 
+struct AirportCityCacheEntry {
+    char iata[4] = {};
+    char city[ROUTE_CITY_MAX_LEN] = {};
+    uint32_t lastUsedMs = 0;
+    bool active = false;
+};
+
 static AppConfig config;
+static SelectedAirport selectedAirports[AIRPORT_COUNT_MAX];
+static size_t selectedAirportCount = 0;
 static Aircraft aircraft[MAX_AIRCRAFT];
 static RouteCacheEntry routeCache[MAX_ROUTE_CACHE];
+static AirportCityCacheEntry airportCityCache[MAX_AIRPORT_CITY_CACHE];
 static Aircraft renderAircraft[MAX_AIRCRAFT];
 static RouteCacheEntry renderRouteCache[MAX_ROUTE_CACHE];
 static AircraftTrack *aircraftTracks = nullptr;
@@ -241,6 +274,121 @@ static float trackDistanceKm(float latA, float lonA, float latB, float lonB) {
     float dxKm = (lonB - lonA) * KM_PER_DEG * cosf(averageLat);
     float dyKm = (latB - latA) * KM_PER_DEG;
     return sqrtf(dxKm * dxKm + dyKm * dyKm);
+}
+
+static float airportCoordinate(int32_t valueE5) {
+    return static_cast<float>(valueE5) / 100000.0f;
+}
+
+static String normalizeAirportIcao(String value) {
+    value.trim();
+    value.toUpperCase();
+    String normalized;
+    normalized.reserve(4);
+    for (size_t i = 0; i < value.length() && normalized.length() < 4; i++) {
+        unsigned char c = static_cast<unsigned char>(value[i]);
+        if (isalnum(c)) {
+            normalized += static_cast<char>(c);
+        }
+    }
+    return normalized.length() >= 2 ? normalized : String();
+}
+
+static const AirportCatalogEntry *findAirportByIcao(const char *icao) {
+    if (icao == nullptr || icao[0] == '\0') return nullptr;
+    size_t low = 0;
+    size_t high = kAirportCatalogCount;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        int comparison = strcmp(kAirportCatalog[middle].icao, icao);
+        if (comparison < 0) {
+            low = middle + 1;
+        } else if (comparison > 0) {
+            high = middle;
+        } else {
+            return &kAirportCatalog[middle];
+        }
+    }
+    return nullptr;
+}
+
+static size_t selectAirportsFor(
+    double latitude,
+    double longitude,
+    AirportSelectionMode mode,
+    uint8_t requestedCount,
+    uint16_t radiusKm,
+    const String &manualIcao,
+    SelectedAirport *out
+) {
+    if (out == nullptr) return 0;
+    for (size_t i = 0; i < AIRPORT_COUNT_MAX; i++) {
+        out[i] = SelectedAirport();
+    }
+
+    if (mode == AirportSelectionMode::Manual) {
+        String normalized = normalizeAirportIcao(manualIcao);
+        const AirportCatalogEntry *airport = findAirportByIcao(normalized.c_str());
+        if (airport == nullptr) return 0;
+        out[0].airport = airport;
+        out[0].distanceKm = trackDistanceKm(
+            static_cast<float>(latitude),
+            static_cast<float>(longitude),
+            airportCoordinate(airport->latE5),
+            airportCoordinate(airport->lonE5)
+        );
+        return 1;
+    }
+
+    size_t limit = std::max<size_t>(1, std::min<size_t>(requestedCount, AIRPORT_COUNT_MAX));
+    size_t count = 0;
+    for (size_t i = 0; i < kAirportCatalogCount; i++) {
+        const AirportCatalogEntry &airport = kAirportCatalog[i];
+        float distanceKm = trackDistanceKm(
+            static_cast<float>(latitude),
+            static_cast<float>(longitude),
+            airportCoordinate(airport.latE5),
+            airportCoordinate(airport.lonE5)
+        );
+        if (distanceKm > radiusKm) continue;
+
+        size_t insertAt = count;
+        for (size_t j = 0; j < count; j++) {
+            if (distanceKm < out[j].distanceKm) {
+                insertAt = j;
+                break;
+            }
+        }
+        if (insertAt >= limit) continue;
+        if (count < limit) count++;
+        for (size_t j = count - 1; j > insertAt; j--) {
+            out[j] = out[j - 1];
+        }
+        out[insertAt].airport = &airport;
+        out[insertAt].distanceKm = distanceKm;
+    }
+    return count;
+}
+
+static void selectConfiguredAirports() {
+    selectedAirportCount = selectAirportsFor(
+        config.lat,
+        config.lon,
+        config.airportSelectionMode,
+        config.airportCount,
+        config.airportRadiusKm,
+        config.manualAirportIcao,
+        selectedAirports
+    );
+    Serial.printf("[airport] mode=%u selected=%u radius_km=%u",
+                  static_cast<unsigned>(config.airportSelectionMode),
+                  static_cast<unsigned>(selectedAirportCount),
+                  static_cast<unsigned>(config.airportRadiusKm));
+    for (size_t i = 0; i < selectedAirportCount; i++) {
+        Serial.printf(" %s=%.1fkm", selectedAirports[i].airport->icao, selectedAirports[i].distanceKm);
+    }
+    Serial.println();
+    Serial.flush();
 }
 
 static AircraftTrack *findAircraftTrackLocked(const char *hex) {
@@ -741,6 +889,25 @@ static void loadConfig() {
     config.lon = prefs.getDouble("lon", DEFAULT_LON);
     config.miles = prefs.getBool("miles", false);
     config.showRunways = prefs.getBool("runways", true);
+    config.airportSelectionMode = prefs.getUChar("apMode", 0) ==
+            static_cast<uint8_t>(AirportSelectionMode::Manual)
+        ? AirportSelectionMode::Manual
+        : AirportSelectionMode::Automatic;
+    config.airportCount = static_cast<uint8_t>(std::max(
+        1,
+        std::min(
+            static_cast<int>(AIRPORT_COUNT_MAX),
+            static_cast<int>(prefs.getUChar("apCount", AIRPORT_COUNT_DEFAULT))
+        )
+    ));
+    config.airportRadiusKm = static_cast<uint16_t>(std::max(
+        static_cast<int>(AIRPORT_RADIUS_MIN_KM),
+        std::min(
+            static_cast<int>(AIRPORT_RADIUS_MAX_KM),
+            static_cast<int>(prefs.getUShort("apRadius", AIRPORT_RADIUS_DEFAULT_KM))
+        )
+    ));
+    config.manualAirportIcao = normalizeAirportIcao(prefs.getString("apIcao", ""));
     config.showLabelCallsign = prefs.getBool("lblCall", true);
     config.showLabelType = prefs.getBool("lblType", true);
     config.showLabelAltitude = prefs.getBool("lblAlt", true);
@@ -769,6 +936,10 @@ static void saveConfig() {
     prefs.putDouble("lon", config.lon);
     prefs.putBool("miles", config.miles);
     prefs.putBool("runways", config.showRunways);
+    prefs.putUChar("apMode", static_cast<uint8_t>(config.airportSelectionMode));
+    prefs.putUChar("apCount", config.airportCount);
+    prefs.putUShort("apRadius", config.airportRadiusKm);
+    prefs.putString("apIcao", config.manualAirportIcao);
     prefs.putBool("lblCall", config.showLabelCallsign);
     prefs.putBool("lblType", config.showLabelType);
     prefs.putBool("lblAlt", config.showLabelAltitude);
@@ -839,9 +1010,19 @@ static void handleRoot() {
             browserLocationLoaded = true;
         }
     }
+    SelectedAirport previewAirports[AIRPORT_COUNT_MAX];
+    size_t previewAirportCount = selectAirportsFor(
+        formLat,
+        formLon,
+        config.airportSelectionMode,
+        config.airportCount,
+        config.airportRadiusKm,
+        config.manualAirportIcao,
+        previewAirports
+    );
 
     String body;
-    body.reserve(11000);
+    body.reserve(13000);
     body += F("<!doctype html><html><head><meta charset='utf-8'>");
     body += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
     body += F("<title>Plane Radar Setup</title>");
@@ -879,7 +1060,49 @@ static void handleRoot() {
     body += F(">Display distances in miles</label>");
     body += F("<label class='check'><input type='checkbox' name='runways' ");
     if (config.showRunways) body += F("checked");
-    body += F(">Show airports and runways</label></section>");
+    body += F(">Show airports and runways</label>");
+    body += F("<label class='field'>Airport selection</label><select id='airport-mode' name='airport_mode' onchange='updateAirportMode()'><option value='0'");
+    if (config.airportSelectionMode == AirportSelectionMode::Automatic) body += F(" selected");
+    body += F(">Nearest to radar center</option><option value='1'");
+    if (config.airportSelectionMode == AirportSelectionMode::Manual) body += F(" selected");
+    body += F(">Manual ICAO code</option></select>");
+    body += F("<div id='airport-auto'><div class='grid'><div><label class='field'>Airports shown</label><select name='airport_count'>");
+    for (uint8_t i = 1; i <= AIRPORT_COUNT_MAX; i++) {
+        body += F("<option value='");
+        body += String(i);
+        body += F("'");
+        if (config.airportCount == i) body += F(" selected");
+        body += F(">");
+        body += String(i);
+        body += F("</option>");
+    }
+    body += F("</select></div><div><label class='field'>Search radius, km</label><input name='airport_radius' type='number' min='10' max='500' step='10' value='");
+    body += String(config.airportRadiusKm);
+    body += F("'></div></div></div>");
+    body += F("<div id='airport-manual'><label class='field'>Airport ICAO code</label><input name='airport_icao' maxlength='4' placeholder='LEVC' value='");
+    body += htmlEscape(config.manualAirportIcao);
+    body += F("'></div><small>Current selection: ");
+    if (!config.showRunways) {
+        body += F("overlay disabled");
+    } else if (previewAirportCount == 0) {
+        body += config.airportSelectionMode == AirportSelectionMode::Manual
+            ? F("ICAO code not found")
+            : F("no airport inside the search radius");
+    } else {
+        for (size_t i = 0; i < previewAirportCount; i++) {
+            if (i > 0) body += F(", ");
+            const AirportCatalogEntry *airport = previewAirports[i].airport;
+            body += airport->icao;
+            if (airport->iata[0] != '\0') {
+                body += F(" / ");
+                body += airport->iata;
+            }
+            body += F(" / ");
+            body += String(previewAirports[i].distanceKm, 1);
+            body += F(" km");
+        }
+    }
+    body += F(". Selection is recalculated after saving the radar location.</small></section>");
 
     body += F("<section><h2>Aircraft symbols</h2><div class='symbol-picker'><label class='symbol-choice'><input type='radio' name='symbol_style' value='0' ");
     if (config.aircraftSymbolStyle == AircraftSymbolStyle::DetailedIcons) body += F("checked");
@@ -917,9 +1140,10 @@ static void handleRoot() {
     body += F("<p><small>Current IP: ");
     body += WiFi.localIP().toString();
     body += F(" AP: 192.168.4.1 Host: plane-radar.local</small></p>");
-    body += F("<script>function useBrowserLocation(){const status=document.getElementById('location-status');"
+    body += F("<script>function updateAirportMode(){const manual=document.getElementById('airport-mode').value==='1';document.getElementById('airport-auto').style.display=manual?'none':'block';document.getElementById('airport-manual').style.display=manual?'block':'none'}"
+              "function useBrowserLocation(){const status=document.getElementById('location-status');"
               "if(window.isSecureContext&&navigator.geolocation){status.textContent='Locating...';navigator.geolocation.getCurrentPosition(function(p){document.getElementById('lat').value=p.coords.latitude.toFixed(6);document.getElementById('lon').value=p.coords.longitude.toFixed(6);status.textContent='Browser location loaded. Save to apply.'},function(e){status.textContent='Location unavailable: '+e.message},{enableHighAccuracy:true,timeout:15000,maximumAge:60000});return}"
-              "const target=location.origin+'/';location.href='https://k4m454k.github.io/big_plane_radar/location.html?return='+encodeURIComponent(target)};</script>");
+              "const target=location.origin+'/';location.href='https://k4m454k.github.io/big_plane_radar/location.html?return='+encodeURIComponent(target)}updateAirportMode();</script>");
     body += F("</body></html>");
     server.send(200, "text/html", body);
 }
@@ -976,6 +1200,25 @@ static void handleSave() {
     double lon = server.arg("lon").toDouble();
     bool miles = server.hasArg("miles");
     bool showRunways = server.hasArg("runways");
+    AirportSelectionMode airportSelectionMode = server.arg("airport_mode").toInt() ==
+            static_cast<int>(AirportSelectionMode::Manual)
+        ? AirportSelectionMode::Manual
+        : AirportSelectionMode::Automatic;
+    long requestedAirportCount = server.hasArg("airport_count")
+        ? server.arg("airport_count").toInt()
+        : config.airportCount;
+    uint8_t airportCount = static_cast<uint8_t>(std::max<long>(
+        1,
+        std::min<long>(AIRPORT_COUNT_MAX, requestedAirportCount)
+    ));
+    long requestedAirportRadius = server.hasArg("airport_radius")
+        ? server.arg("airport_radius").toInt()
+        : config.airportRadiusKm;
+    uint16_t airportRadiusKm = static_cast<uint16_t>(std::max<long>(
+        AIRPORT_RADIUS_MIN_KM,
+        std::min<long>(AIRPORT_RADIUS_MAX_KM, requestedAirportRadius)
+    ));
+    String manualAirportIcao = normalizeAirportIcao(server.arg("airport_icao"));
     bool showLabelCallsign = server.hasArg("label_callsign");
     bool showLabelType = server.hasArg("label_type");
     bool showLabelAltitude = server.hasArg("label_altitude");
@@ -1003,6 +1246,10 @@ static void handleSave() {
     config.lon = lon;
     config.miles = miles;
     config.showRunways = showRunways;
+    config.airportSelectionMode = airportSelectionMode;
+    config.airportCount = airportCount;
+    config.airportRadiusKm = airportRadiusKm;
+    config.manualAirportIcao = manualAirportIcao;
     config.showLabelCallsign = showLabelCallsign;
     config.showLabelType = showLabelType;
     config.showLabelAltitude = showLabelAltitude;
@@ -1261,14 +1508,132 @@ static bool copyAirportIata(const JsonObject &airport, char *out, size_t outLen)
            copyIataCode(airport, "iataCode", out, outLen);
 }
 
-static const char *cityForIata(const char *iata) {
+static char latinCodepointToAscii(uint32_t codepoint) {
+    if (codepoint >= 0x00C0 && codepoint <= 0x00C5) return 'A';
+    if (codepoint >= 0x00E0 && codepoint <= 0x00E5) return 'a';
+    if (codepoint == 0x00C6) return 'A';
+    if (codepoint == 0x00E6) return 'a';
+    if (codepoint == 0x00C7) return 'C';
+    if (codepoint == 0x00E7) return 'c';
+    if (codepoint >= 0x00C8 && codepoint <= 0x00CB) return 'E';
+    if (codepoint >= 0x00E8 && codepoint <= 0x00EB) return 'e';
+    if (codepoint >= 0x00CC && codepoint <= 0x00CF) return 'I';
+    if (codepoint >= 0x00EC && codepoint <= 0x00EF) return 'i';
+    if (codepoint == 0x00D0) return 'D';
+    if (codepoint == 0x00F0) return 'd';
+    if (codepoint == 0x00D1) return 'N';
+    if (codepoint == 0x00F1) return 'n';
+    if ((codepoint >= 0x00D2 && codepoint <= 0x00D6) || codepoint == 0x00D8) return 'O';
+    if ((codepoint >= 0x00F2 && codepoint <= 0x00F6) || codepoint == 0x00F8) return 'o';
+    if (codepoint >= 0x00D9 && codepoint <= 0x00DC) return 'U';
+    if (codepoint >= 0x00F9 && codepoint <= 0x00FC) return 'u';
+    if (codepoint == 0x00DD || codepoint == 0x0178) return 'Y';
+    if (codepoint == 0x00FD || codepoint == 0x00FF) return 'y';
+    if (codepoint == 0x00DE) return 'T';
+    if (codepoint == 0x00FE) return 't';
+    if (codepoint == 0x00DF) return 's';
+    return '\0';
+}
+
+static bool copyRouteCity(const JsonObject &airport, char *out, size_t outLen) {
+    if (outLen == 0) return false;
+    out[0] = '\0';
+    const char *value = nullptr;
+    if (airport["municipality"].is<const char *>()) {
+        value = airport["municipality"].as<const char *>();
+    }
+    if ((value == nullptr || value[0] == '\0') && airport["name"].is<const char *>()) {
+        value = airport["name"].as<const char *>();
+    }
+    if (value == nullptr) return false;
+
+    size_t readIndex = 0;
+    size_t writeIndex = 0;
+    bool previousSpace = false;
+    while (value[readIndex] != '\0' && writeIndex + 1 < outLen) {
+        const uint8_t first = static_cast<uint8_t>(value[readIndex]);
+        uint32_t codepoint = 0;
+        size_t advance = 1;
+        if (first < 0x80) {
+            codepoint = first;
+        } else if ((first & 0xE0) == 0xC0 && value[readIndex + 1] != '\0') {
+            codepoint = ((first & 0x1F) << 6) |
+                        (static_cast<uint8_t>(value[readIndex + 1]) & 0x3F);
+            advance = 2;
+        } else if ((first & 0xF0) == 0xE0 &&
+                   value[readIndex + 1] != '\0' && value[readIndex + 2] != '\0') {
+            codepoint = ((first & 0x0F) << 12) |
+                        ((static_cast<uint8_t>(value[readIndex + 1]) & 0x3F) << 6) |
+                        (static_cast<uint8_t>(value[readIndex + 2]) & 0x3F);
+            advance = 3;
+        }
+        readIndex += advance;
+
+        char ascii = '\0';
+        if (codepoint >= 0x20 && codepoint <= 0x7E) {
+            ascii = static_cast<char>(codepoint);
+        } else {
+            ascii = latinCodepointToAscii(codepoint);
+        }
+        if (ascii == '\0') continue;
+        if (ascii == ' ') {
+            if (writeIndex == 0 || previousSpace) continue;
+            previousSpace = true;
+        } else {
+            previousSpace = false;
+        }
+        out[writeIndex++] = ascii;
+    }
+    while (writeIndex > 0 && out[writeIndex - 1] == ' ') {
+        writeIndex--;
+    }
+    out[writeIndex] = '\0';
+    return writeIndex > 0;
+}
+
+static AirportCityCacheEntry *findAirportCityCacheLocked(const char *iata) {
     if (iata == nullptr || strlen(iata) != 3) return nullptr;
-    for (size_t i = 0; i < kIataAirportCityCount; i++) {
-        if (strcmp(kIataAirportCities[i].iata, iata) == 0) {
-            return kIataAirportCities[i].city;
+    for (size_t i = 0; i < MAX_AIRPORT_CITY_CACHE; i++) {
+        if (airportCityCache[i].active && strcmp(airportCityCache[i].iata, iata) == 0) {
+            return &airportCityCache[i];
         }
     }
     return nullptr;
+}
+
+static void rememberAirportCityLocked(const char *iata, const char *city, uint32_t now) {
+    if (iata == nullptr || strlen(iata) != 3 || city == nullptr || city[0] == '\0') return;
+    AirportCityCacheEntry *entry = findAirportCityCacheLocked(iata);
+    if (entry == nullptr) {
+        entry = &airportCityCache[0];
+        for (size_t i = 0; i < MAX_AIRPORT_CITY_CACHE; i++) {
+            if (!airportCityCache[i].active) {
+                entry = &airportCityCache[i];
+                break;
+            }
+            if (airportCityCache[i].lastUsedMs < entry->lastUsedMs) {
+                entry = &airportCityCache[i];
+            }
+        }
+        *entry = AirportCityCacheEntry();
+        strlcpy(entry->iata, iata, sizeof(entry->iata));
+        entry->active = true;
+    }
+    strlcpy(entry->city, city, sizeof(entry->city));
+    entry->lastUsedMs = now;
+}
+
+static void fillRouteCityFromCacheLocked(
+    const char *iata,
+    char *city,
+    size_t cityLen,
+    uint32_t now
+) {
+    if (cityLen == 0 || city[0] != '\0') return;
+    AirportCityCacheEntry *entry = findAirportCityCacheLocked(iata);
+    if (entry == nullptr) return;
+    strlcpy(city, entry->city, cityLen);
+    entry->lastUsedMs = now;
 }
 
 static RouteCacheEntry *findRouteCacheEntry(const char *callsign) {
@@ -1349,9 +1714,13 @@ static bool lookupRouteForCallsign(RouteCacheEntry &entry) {
     filter["response"]["flightroute"]["origin"]["iata_code"] = true;
     filter["response"]["flightroute"]["origin"]["iata"] = true;
     filter["response"]["flightroute"]["origin"]["iataCode"] = true;
+    filter["response"]["flightroute"]["origin"]["municipality"] = true;
+    filter["response"]["flightroute"]["origin"]["name"] = true;
     filter["response"]["flightroute"]["destination"]["iata_code"] = true;
     filter["response"]["flightroute"]["destination"]["iata"] = true;
     filter["response"]["flightroute"]["destination"]["iataCode"] = true;
+    filter["response"]["flightroute"]["destination"]["municipality"] = true;
+    filter["response"]["flightroute"]["destination"]["name"] = true;
     JsonDocument doc;
     DeserializationError err = deserializeJson(
         doc,
@@ -1370,13 +1739,17 @@ static bool lookupRouteForCallsign(RouteCacheEntry &entry) {
 
     char origin[4] = {};
     char destination[4] = {};
-    if (!copyAirportIata(route["origin"].as<JsonObject>(), origin, sizeof(origin)) ||
-        !copyAirportIata(route["destination"].as<JsonObject>(), destination, sizeof(destination))) {
+    JsonObject originAirport = route["origin"].as<JsonObject>();
+    JsonObject destinationAirport = route["destination"].as<JsonObject>();
+    if (!copyAirportIata(originAirport, origin, sizeof(origin)) ||
+        !copyAirportIata(destinationAirport, destination, sizeof(destination))) {
         return false;
     }
 
     strlcpy(entry.originIata, origin, sizeof(entry.originIata));
     strlcpy(entry.destinationIata, destination, sizeof(entry.destinationIata));
+    copyRouteCity(originAirport, entry.originCity, sizeof(entry.originCity));
+    copyRouteCity(destinationAirport, entry.destinationCity, sizeof(entry.destinationCity));
     entry.hasRoute = true;
     return true;
 }
@@ -1426,14 +1799,32 @@ static bool serviceRouteLookup() {
         if (ok) {
             strlcpy(entry->originIata, lookupEntry.originIata, sizeof(entry->originIata));
             strlcpy(entry->destinationIata, lookupEntry.destinationIata, sizeof(entry->destinationIata));
+            strlcpy(entry->originCity, lookupEntry.originCity, sizeof(entry->originCity));
+            strlcpy(entry->destinationCity, lookupEntry.destinationCity, sizeof(entry->destinationCity));
+            rememberAirportCityLocked(entry->originIata, entry->originCity, now);
+            rememberAirportCityLocked(entry->destinationIata, entry->destinationCity, now);
+            fillRouteCityFromCacheLocked(
+                entry->originIata,
+                entry->originCity,
+                sizeof(entry->originCity),
+                now
+            );
+            fillRouteCityFromCacheLocked(
+                entry->destinationIata,
+                entry->destinationCity,
+                sizeof(entry->destinationCity),
+                now
+            );
             entry->hasRoute = true;
             networkDataDirty = true;
         }
-        Serial.printf("[route] callsign=%s ok=%d origin=%s destination=%s\n",
+        Serial.printf("[route] callsign=%s ok=%d origin=%s/%s destination=%s/%s\n",
                       entry->callsign,
                       ok ? 1 : 0,
                       entry->originIata,
-                      entry->destinationIata);
+                      entry->originCity,
+                      entry->destinationIata,
+                      entry->destinationCity);
     }
     unlockState();
     Serial.flush();
@@ -1451,6 +1842,55 @@ static const RouteCacheEntry *findRouteCacheEntryIn(
         }
     }
     return nullptr;
+}
+
+static void formatRoutePlace(
+    const char *city,
+    const char *iata,
+    size_t keepChars,
+    char *out,
+    size_t outLen
+) {
+    if (outLen == 0) return;
+    out[0] = '\0';
+    if (city == nullptr || city[0] == '\0') {
+        strlcpy(out, iata != nullptr ? iata : "", outLen);
+        return;
+    }
+
+    size_t cityLen = strlen(city);
+    if (keepChars >= cityLen) {
+        strlcpy(out, city, outLen);
+        return;
+    }
+
+    size_t copyLen = std::min(keepChars, outLen > 4 ? outLen - 4 : 0);
+    while (copyLen > 0 && city[copyLen - 1] == ' ') {
+        copyLen--;
+    }
+    if (copyLen == 0) {
+        strlcpy(out, iata != nullptr ? iata : "", outLen);
+        return;
+    }
+    memcpy(out, city, copyLen);
+    out[copyLen] = '\0';
+    strlcat(out, "...", outLen);
+}
+
+static bool canShortenRoutePlace(size_t cityLen, size_t keepChars) {
+    if (cityLen <= ROUTE_CITY_MIN_PREFIX) return false;
+    if (keepChars >= cityLen) {
+        return cityLen > ROUTE_CITY_MIN_PREFIX + 3;
+    }
+    return keepChars > ROUTE_CITY_MIN_PREFIX;
+}
+
+static void shortenRoutePlace(size_t cityLen, size_t &keepChars) {
+    if (keepChars >= cityLen) {
+        keepChars = std::max(ROUTE_CITY_MIN_PREFIX, cityLen - 4);
+    } else if (keepChars > ROUTE_CITY_MIN_PREFIX) {
+        keepChars--;
+    }
 }
 
 template <typename Gfx>
@@ -1475,17 +1915,45 @@ static bool routeLabelForCallsign(
         return false;
     }
 
-    const char *originCity = cityForIata(entry->originIata);
-    const char *destinationCity = cityForIata(entry->destinationIata);
-    snprintf(out,
-             outLen,
-             "%s - %s",
-             originCity != nullptr ? originCity : entry->originIata,
-             destinationCity != nullptr ? destinationCity : entry->destinationIata);
+    size_t originLen = strlen(entry->originCity);
+    size_t destinationLen = strlen(entry->destinationCity);
+    size_t originKeep = originLen;
+    size_t destinationKeep = destinationLen;
+    char origin[ROUTE_CITY_MAX_LEN + 4];
+    char destination[ROUTE_CITY_MAX_LEN + 4];
 
-    if (g.textWidth(out) > maxWidth) {
-        snprintf(out, outLen, "%s - %s", entry->originIata, entry->destinationIata);
+    for (size_t attempt = 0; attempt < ROUTE_CITY_MAX_LEN * 2; attempt++) {
+        formatRoutePlace(
+            entry->originCity,
+            entry->originIata,
+            originKeep,
+            origin,
+            sizeof(origin)
+        );
+        formatRoutePlace(
+            entry->destinationCity,
+            entry->destinationIata,
+            destinationKeep,
+            destination,
+            sizeof(destination)
+        );
+        snprintf(out, outLen, "%s - %s", origin, destination);
+        if (g.textWidth(out) <= maxWidth) {
+            return out[0] != '\0';
+        }
+
+        bool canShortenOrigin = canShortenRoutePlace(originLen, originKeep);
+        bool canShortenDestination = canShortenRoutePlace(destinationLen, destinationKeep);
+        if (!canShortenOrigin && !canShortenDestination) break;
+        if (canShortenOrigin &&
+            (!canShortenDestination || g.textWidth(origin) >= g.textWidth(destination))) {
+            shortenRoutePlace(originLen, originKeep);
+        } else {
+            shortenRoutePlace(destinationLen, destinationKeep);
+        }
     }
+
+    snprintf(out, outLen, "%s - %s", entry->originIata, entry->destinationIata);
     return out[0] != '\0';
 }
 
@@ -2006,20 +2474,48 @@ static void drawRunways(Gfx &g) {
     g.setTextSize(1);
     g.setTextColor(colorRunway, colorBg);
     g.setTextDatum(textdatum_t::middle_center);
-    for (size_t i = 0; i < kRunwayCount; i++) {
-        int x = 0;
-        int y = 0;
-        float distKm = 0;
-        if (!toRadarPoint(kRunways[i].lat, kRunways[i].lon, x, y, distKm)) continue;
-        if (x < -20 || x > SCREEN_W + 20 || y < -20 || y > SCREEN_H + 20) continue;
-        float pxPerKm = static_cast<float>(RADAR_RADIUS) / activeOuterKm();
-        float half = std::max(8.0f, kRunways[i].lengthKm * pxPerKm * 0.5f);
-        float rad = kRunways[i].headingDeg * DEG_TO_RAD;
-        float latRad = kRunways[i].lat * DEG_TO_RAD;
-        int dx = lroundf(sinf(rad) * half);
-        int dy = lroundf(cosf(rad) * half * cosf(latRad));
-        g.drawWideLine(x - dx, y + dy, x + dx, y - dy, 2.0f, colorRunway);
-        g.drawString(kRunways[i].icao, x, y - 12);
+    bool rectangularMap = RadarMap::background.isReady(rangeIndex);
+    float pxPerKm = static_cast<float>(RADAR_RADIUS) / activeOuterKm();
+    for (size_t airportIndex = 0; airportIndex < selectedAirportCount; airportIndex++) {
+        const AirportCatalogEntry &airport = *selectedAirports[airportIndex].airport;
+        for (size_t runwayOffset = 0; runwayOffset < airport.runwayCount; runwayOffset++) {
+            size_t runwayIndex = static_cast<size_t>(airport.firstRunway) + runwayOffset;
+            if (runwayIndex >= kAirportRunwayCount) break;
+            const AirportRunwayEntry &runway = kAirportRunways[runwayIndex];
+            float latitude = airportCoordinate(runway.latE5);
+            float longitude = airportCoordinate(runway.lonE5);
+            int x = 0;
+            int y = 0;
+            float distKm = 0;
+            bool insideRadar = toRadarPoint(latitude, longitude, x, y, distKm);
+            if (!rectangularMap && !insideRadar) continue;
+            if (x < -20 || x > PANEL_X + 20 || y < -20 || y > SCREEN_H + 20) continue;
+
+            float half = std::max(
+                8.0f,
+                (static_cast<float>(runway.lengthMeters) / 1000.0f) * pxPerKm * 0.5f
+            );
+            float rad = (static_cast<float>(runway.headingDeciDeg) / 10.0f) * DEG_TO_RAD;
+            int dx = lroundf(sinf(rad) * half);
+            int dy = lroundf(cosf(rad) * half);
+            g.drawWideLine(x - dx, y + dy, x + dx, y - dy, 2.0f, colorRunway);
+        }
+
+        int labelX = 0;
+        int labelY = 0;
+        float labelDistanceKm = 0;
+        bool labelInsideRadar = toRadarPoint(
+            airportCoordinate(airport.latE5),
+            airportCoordinate(airport.lonE5),
+            labelX,
+            labelY,
+            labelDistanceKm
+        );
+        if ((rectangularMap || labelInsideRadar) &&
+            labelX >= -20 && labelX <= PANEL_X + 20 &&
+            labelY >= -20 && labelY <= SCREEN_H + 20) {
+            g.drawString(airport.icao, labelX, labelY - 12);
+        }
     }
 }
 
@@ -2118,7 +2614,7 @@ static void drawAircraftList(
             g.setTextColor(colorWarn, rowBg);
             g.drawString(alert, PANEL_TEXT_X, rowY + 32);
         } else {
-            char route[64];
+            char route[(ROUTE_CITY_MAX_LEN * 2) + 8];
             if (routeLabelForCallsign(
                     g, routes, routeCount, item.callsign, textWidth, route, sizeof(route))) {
                 g.setTextColor(colorRunway, rowBg);
@@ -2558,17 +3054,22 @@ void setup() {
     logStep("loadConfig begin");
     setBootStage(BOOT_CONFIG, BootStatus::Running);
     loadConfig();
+    selectConfiguredAirports();
     mapRuntimeReady = config.mapProvider == MapProvider::Stadia &&
                       !config.stadiaApiKey.isEmpty() &&
                       RadarMap::background.begin(PANEL_X, SCREEN_H, RANGE_COUNT);
     setBootStage(BOOT_CONFIG, BootStatus::Ok);
-    Serial.printf("[config] configured=%d ssid_len=%u lat=%.6f lon=%.6f range=%u runways=%d miles=%d map=%u map_brightness=%u map_key_len=%u labels=%d%d%d%d symbols=%u\n",
+    Serial.printf("[config] configured=%d ssid_len=%u lat=%.6f lon=%.6f range=%u runways=%d airport_mode=%u airport_count=%u airport_radius=%u airport_icao=%s miles=%d map=%u map_brightness=%u map_key_len=%u labels=%d%d%d%d symbols=%u\n",
                   config.configured,
                   static_cast<unsigned>(config.ssid.length()),
                   config.lat,
                   config.lon,
                   static_cast<unsigned>(rangeIndex),
                   config.showRunways,
+                  static_cast<unsigned>(config.airportSelectionMode),
+                  static_cast<unsigned>(config.airportCount),
+                  static_cast<unsigned>(config.airportRadiusKm),
+                  config.manualAirportIcao.c_str(),
                   config.miles,
                   static_cast<unsigned>(config.mapProvider),
                   static_cast<unsigned>(config.mapBrightness),
