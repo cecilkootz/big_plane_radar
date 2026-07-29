@@ -1,5 +1,7 @@
 # Big Plane Radar
 
+[Русская версия](README.ru.md)
+
 Firmware for the Waveshare ESP32-S3-Touch-LCD-7 display. It shows a live ADS-B
 radar centered on a configurable location, with aircraft symbols, labels,
 altitude, vertical speed, range rings, and a compact aircraft list.
@@ -9,6 +11,119 @@ uses Waveshare's official `ESP32_Display_Panel` stack for the 800x480 RGB LCD an
 GT911 touch panel.
 
 ![Big Plane Radar running on Waveshare ESP32-S3-Touch-LCD-7](docs/plane-radar.png)
+
+## Quick Start (Recommended)
+
+This is the easiest way to install Big Plane Radar on a new display. You do not
+need Arduino IDE, `arduino-cli`, Python, or `esptool`.
+
+### What you need
+
+- a Waveshare ESP32-S3-Touch-LCD-7;
+- a USB cable that supports data, not a charge-only cable;
+- a Windows, macOS, or Linux computer with Google Chrome or Microsoft Edge;
+- a 2.4 GHz Wi-Fi network and its password. ESP32-S3 cannot connect to a
+  5 GHz-only network;
+- optionally, a Stadia Maps API key if you want a map under the radar.
+
+Phones, tablets, Safari, and Firefox cannot use the browser installer because
+they do not provide the required Web Serial support.
+
+### 1. Connect the display
+
+1. Disconnect the display from USB.
+2. Move the small UART selection switch on the board to `UART1`.
+3. Connect the USB cable to the display connector marked `UART1` or
+   `USB TO UART`. Do not use the neighboring native USB connector.
+4. Connect the other end to the computer.
+
+### 2. Install the firmware in your browser
+
+1. Open the
+   **[Big Plane Radar Web Installer](https://k4m454k.github.io/big_plane_radar/web-installer/)**
+   in Chrome or Edge.
+2. Click **Install Big Plane Radar**, then click **Connect**.
+3. Select the new USB serial device from the list. It is normally named
+   `USB Serial`, `CH343`, `wchusbserial`, or similar.
+4. Confirm the installation and wait until it reaches 100%. Do not disconnect
+   the cable during flashing.
+5. On the first installation, allow the installer to erase the device if it
+   asks. For a later firmware update, leave erase disabled to preserve the
+   saved settings.
+6. If the display does not restart automatically, press its `RESET` button once.
+
+### 3. Prepare a map key (optional)
+
+The radar works without a map. Skip this step and select `None` during setup if
+you prefer the plain radar background.
+
+To enable the map, do this before connecting your computer to the display's
+setup Wi-Fi:
+
+1. [Create a Stadia Maps account](https://client.stadiamaps.com/signup/).
+2. Open the [Stadia Maps client dashboard](https://client.stadiamaps.com/).
+3. Open **Manage Properties**, find **Authentication Configuration**, and
+   generate an API key.
+4. Keep the key available for the next step. Do not publish it in screenshots
+   or commits.
+
+### 4. Configure the radar
+
+1. Wait for the display to create the Wi-Fi network `PlaneRadar-Setup`.
+2. Connect the computer or phone to `PlaneRadar-Setup`. It has no password.
+3. If the setup page does not open automatically, open
+   **[http://192.168.4.1](http://192.168.4.1)**.
+4. Enter the name and password of your 2.4 GHz Wi-Fi network.
+5. Set the radar center to your location. Press **Use browser location**, or
+   enter decimal latitude and longitude copied from a map application.
+6. For a plain background, leave **Map background** set to `None`. For a map,
+   select `Stadia Alidade Smooth Dark` and paste the API key from step 3.
+7. Leave the other settings at their defaults for the first run.
+8. Press **Save and reboot**.
+
+`PlaneRadar-Setup` disappearing after **Save and reboot** is normal: the display
+is switching to your home Wi-Fi.
+
+If **Use browser location** cannot load while connected to `PlaneRadar-Setup`,
+enter coordinates manually. You can change them later from
+`http://plane-radar.local` after both devices are connected to your normal
+Wi-Fi.
+
+The first map-enabled boot downloads four map images. Keep the device powered
+and wait for `MAP CACHE ... 4/4`; the radar opens automatically afterwards.
+
+### Everyday controls
+
+- tap the radar to change its range;
+- tap an aircraft in the right-hand list to show or hide its track;
+- long-press the screen to reopen the setup portal;
+- open [http://plane-radar.local](http://plane-radar.local) from the same Wi-Fi
+  to change settings later.
+
+### If something does not work
+
+- **The installer cannot find the display:** use Chrome or Edge on a computer,
+  check that both the switch and cable are on `UART1`, try another data cable,
+  close serial-terminal applications, and reconnect USB.
+- **No serial device appears:** the board uses a CH343 USB-to-UART chip. Install
+  the official [WCH driver for macOS](https://www.wch-ic.com/downloads/CH341SER_MAC_ZIP.html)
+  or [WCH driver for Windows](https://www.wch-ic.com/downloads/CH343SER_EXE.html),
+  then reconnect the board. Modern Linux kernels normally include the driver.
+- **Linux sees the port but the installer cannot open it:** add your user to
+  the `dialout` group with `sudo usermod -aG dialout "$USER"`, sign out, and
+  sign in again.
+- **`PlaneRadar-Setup` does not appear:** press `RESET`, wait for the boot
+  sequence, and hold a finger on the screen when the footer asks you to hold it
+  for setup.
+- **`plane-radar.local` does not open:** use the display's IP address from your
+  router instead. For example, open `http://192.168.1.123`.
+- **The boot screen says `NO KEY`:** a Stadia map was selected without a valid
+  API key. Reopen setup and add the key or select `None`.
+- **The radar is empty:** verify Wi-Fi and location, then try a wider range by
+  tapping the radar.
+
+The official board documentation is available on the
+[Waveshare wiki](https://docs.waveshare.com/ESP32-S3-Touch-LCD-7).
 
 ## 3D-Printed Stand
 
@@ -129,7 +244,12 @@ generate data manually.
 See the complete [airport data and generation guide](docs/AIRPORT_DATA.md).
 [Russian version](docs/AIRPORT_DATA.ru.md).
 
-## Install Tools
+## Build From Source (Developers)
+
+Everything below is only needed to modify or build the firmware. For a normal
+installation, use the browser-based Quick Start above.
+
+### Install tools
 
 Install:
 
@@ -144,7 +264,7 @@ arduino-cli core update-index
 arduino-cli core install esp32:esp32
 ```
 
-## Build
+### Build
 
 ```sh
 bash build_arduino_cli.sh
@@ -194,7 +314,7 @@ the next boot, including after changing the radar coordinates in setup. The
 boot screen reports map progress as `1/4` through `4/4`; it shows `SKIP` when
 maps are disabled and `NO KEY` when Stadia is selected without a key.
 
-## Upload
+### Upload over USB
 
 Put the board switch into `UART1`, plug USB into the `UART1` port, then run:
 
@@ -216,85 +336,50 @@ PORT=/dev/ttyUSB0
 
 ## Browser Flashing
 
-You can also flash the board directly from a browser with Web Serial support.
-Use Chrome, Edge, or another Chromium-based desktop browser. iOS browsers do not
-support this workflow.
+Browser flashing is the recommended installation method. Use Chrome, Edge, or
+another Chromium-based desktop browser with Web Serial support.
 
-### Option A: Adafruit WebSerial ESPTool
+### Hosted installer (recommended)
 
-This is the quickest no-hosting option because it lets you choose a local binary
-file manually:
+Open the
+**[Big Plane Radar Web Installer](https://k4m454k.github.io/big_plane_radar/web-installer/)**,
+press **Install Big Plane Radar**, and select the ESP32-S3 serial port. The page
+uses [ESP Web Tools](https://esphome.github.io/esp-web-tools/) and always installs
+the merged binary published with this repository.
+
+### Manual browser fallback
+
+If the hosted installer is unavailable:
 
 1. Open [Adafruit WebSerial ESPTool](https://adafruit.github.io/Adafruit_WebSerial_ESPTool/).
 2. Set the board switch to `UART1` and plug USB into the `UART1` port.
 3. Click `Connect` and select the ESP32-S3 serial port.
-4. Use one file row:
+4. Download
+   [`big_plane_radar.ino.merged.bin`](https://github.com/k4m454k/big_plane_radar/releases/latest/download/big_plane_radar.ino.merged.bin).
+5. Use one file row:
    - offset: `0x0`
-   - file: `releases/big_plane_radar.ino.merged.bin`
-5. Click `Erase`, then `Program`.
+   - file: the downloaded `big_plane_radar.ino.merged.bin`
+6. Click `Erase`, then `Program`.
 
 Use the merged binary for browser flashing.
 
-### Option B: ESP Web Tools Page
+## Setup Page Reference
 
-This repository includes a ready static installer in `web-installer/`. It uses
-[ESP Web Tools](https://esphome.github.io/esp-web-tools/), which installs
-firmware from a manifest and release binary.
-
-To use it:
-
-1. Publish this repository with GitHub Pages or another HTTPS static host.
-2. Open:
-
-```text
-https://<your-github-user>.github.io/big_plane_radar/web-installer/
-```
-
-3. Press `Install Big Plane Radar` and select the ESP32-S3 serial port.
-
-ESP Web Tools requires HTTPS and the firmware file must be fetchable by the
-browser. The included manifest points to:
-
-```text
-../releases/big_plane_radar.ino.merged.bin
-```
-
-## First Boot
-
-If no configuration is saved, the board starts a Wi-Fi access point:
-
-```text
-PlaneRadar-Setup
-```
-
-Connect to it and open:
-
-```text
-http://192.168.4.1
-```
-
-After the board joins your Wi-Fi, the setup page is also available at:
-
-```text
-http://plane-radar.local
-```
-
-Set Wi-Fi, radar center coordinates, units, automatic or manual airport/runway
-selection, aircraft symbol style and label fields, map brightness, and optional
-map background there. The symbol selector previews both detailed icons and
-classic symbols.
-Select `None` for the original plain radar, or select `Stadia Alidade Smooth
-Dark` and enter a Stadia Maps API key. The board reboots after saving.
+The setup page is available at `http://192.168.4.1` while connected to
+`PlaneRadar-Setup`, or at `http://plane-radar.local` after the board joins your
+normal Wi-Fi. It controls the radar center, units, airport/runway selection,
+aircraft symbol style, label fields, map brightness, and map background.
 
 `Use browser location` fills the coordinate fields using the browser's precise
 location. Browsers allow geolocation only from a secure context, while the ESP
 setup page is served over local HTTP. The button therefore opens the repository's
-HTTPS `location.html` helper and returns the coordinates to the local setup page;
-GitHub Pages must be enabled for the repository root for this flow to work.
+hosted HTTPS `location.html` helper and returns the coordinates to the local
+setup page.
 
 The firmware uses the Stadia Maps Static Maps API and preserves the attribution
 rendered into the returned map image. See the official
-[Stadia Maps static map documentation](https://docs.stadiamaps.com/static-maps/).
+[API-key instructions](https://docs.stadiamaps.com/authentication/) and
+[Static Maps documentation](https://docs.stadiamaps.com/static-maps/).
 
 ## Screenshot
 
