@@ -58,6 +58,8 @@ static constexpr int PANEL_TEXT_X = PANEL_X + 42;
 static constexpr int PANEL_RIGHT = SCREEN_W - 10;
 static constexpr int PANEL_LIST_TOP = 42;
 static constexpr int PANEL_ROW_H = 54;
+static constexpr size_t PANEL_MAX_ROWS =
+    (SCREEN_H - PANEL_LIST_TOP - 4) / PANEL_ROW_H;
 static constexpr int AIRCRAFT_LABEL_LINE_ADVANCE = 9;
 static constexpr int AIRCRAFT_LABEL_LINE_HEIGHT = 7;
 static constexpr int AIRCRAFT_LABEL_PADDING = 1;
@@ -75,7 +77,14 @@ static constexpr uint32_t ROUTE_HTTP_TIMEOUT_MS = 2500;
 static constexpr uint32_t BOOT_SETUP_WINDOW_MS = 4000;
 static constexpr uint32_t TOUCH_LONG_PRESS_MS = 1200;
 static constexpr uint32_t TOUCH_TAP_MIN_MS = 50;
+static constexpr int TOUCH_TAP_MOVE_MAX_PX = 18;
 static constexpr uint32_t CONFIG_HOLD_NOTICE_MS = 900;
+static constexpr uint32_t TRACK_STALE_MS = 60000;
+static constexpr uint32_t TRACK_BREAK_GAP_MS = 60000;
+static constexpr uint32_t TRACK_SELECTION_MISSING_MS = 15000;
+static constexpr size_t TRACK_POINTS_PER_AIRCRAFT = 120;
+static constexpr float TRACK_MIN_POINT_DISTANCE_KM = 0.03f;
+static constexpr float TRACK_MAX_PLAUSIBLE_SPEED_KNOTS = 1500.0f;
 static constexpr float KM_PER_NM = 1.852f;
 static constexpr float KM_PER_DEG = 111.0f;
 static constexpr size_t MAX_AIRCRAFT = 64;
@@ -113,6 +122,7 @@ struct Aircraft {
     float gsKnots = 0;
     float verticalRateFpm = 0;
     char callsign[10] = {};
+    char hex[7] = {};
     char type[8] = {};
     char category[4] = {};
     char squawk[5] = {};
@@ -126,6 +136,21 @@ struct Aircraft {
     uint32_t positionMs = 0;
     bool inside = false;
     bool hasFlight = false;
+};
+
+struct TrackPoint {
+    float lat = 0;
+    float lon = 0;
+    uint32_t receivedMs = 0;
+};
+
+struct AircraftTrack {
+    char hex[7] = {};
+    uint16_t start = 0;
+    uint16_t count = 0;
+    uint32_t lastSeenMs = 0;
+    bool active = false;
+    TrackPoint points[TRACK_POINTS_PER_AIRCRAFT];
 };
 
 struct RouteCacheEntry {
@@ -144,6 +169,11 @@ static Aircraft aircraft[MAX_AIRCRAFT];
 static RouteCacheEntry routeCache[MAX_ROUTE_CACHE];
 static Aircraft renderAircraft[MAX_AIRCRAFT];
 static RouteCacheEntry renderRouteCache[MAX_ROUTE_CACHE];
+static AircraftTrack *aircraftTracks = nullptr;
+static TrackPoint renderTrack[TRACK_POINTS_PER_AIRCRAFT];
+static char selectedAircraftHex[7] = {};
+static char visibleListAircraftHex[PANEL_MAX_ROWS][7] = {};
+static size_t visibleListRowCount = 0;
 static size_t aircraftCount = 0;
 static String statusText = "BOOT";
 static String lastFetchText = "NO DATA";
@@ -165,6 +195,10 @@ static TaskHandle_t networkTaskHandle = nullptr;
 static volatile bool networkDataDirty = false;
 static bool touchWasDown = false;
 static uint32_t touchDownMs = 0;
+static uint16_t touchDownX = 0;
+static uint16_t touchDownY = 0;
+static uint16_t touchLastX = 0;
+static uint16_t touchLastY = 0;
 static bool longPressHandled = false;
 static bool configNoticeShown = false;
 
@@ -178,6 +212,177 @@ static void unlockState() {
     if (stateMutex != nullptr) {
         xSemaphoreGive(stateMutex);
     }
+}
+
+static bool initAircraftTrackCache() {
+    size_t bytes = MAX_AIRCRAFT * sizeof(AircraftTrack);
+    aircraftTracks = static_cast<AircraftTrack *>(heap_caps_calloc(
+        1,
+        bytes,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    ));
+    if (aircraftTracks == nullptr) {
+        Serial.printf("[track] PSRAM allocation failed bytes=%u; tracks disabled\n",
+                      static_cast<unsigned>(bytes));
+        Serial.flush();
+        return false;
+    }
+
+    Serial.printf("[track] cache ready tracks=%u points=%u bytes=%u\n",
+                  static_cast<unsigned>(MAX_AIRCRAFT),
+                  static_cast<unsigned>(TRACK_POINTS_PER_AIRCRAFT),
+                  static_cast<unsigned>(bytes));
+    Serial.flush();
+    return true;
+}
+
+static float trackDistanceKm(float latA, float lonA, float latB, float lonB) {
+    float averageLat = (latA + latB) * 0.5f * DEG_TO_RAD;
+    float dxKm = (lonB - lonA) * KM_PER_DEG * cosf(averageLat);
+    float dyKm = (latB - latA) * KM_PER_DEG;
+    return sqrtf(dxKm * dxKm + dyKm * dyKm);
+}
+
+static AircraftTrack *findAircraftTrackLocked(const char *hex) {
+    if (aircraftTracks == nullptr || hex == nullptr || hex[0] == '\0') {
+        return nullptr;
+    }
+    for (size_t i = 0; i < MAX_AIRCRAFT; i++) {
+        if (aircraftTracks[i].active && strcmp(aircraftTracks[i].hex, hex) == 0) {
+            return &aircraftTracks[i];
+        }
+    }
+    return nullptr;
+}
+
+static AircraftTrack *allocateAircraftTrackLocked(const char *hex) {
+    if (aircraftTracks == nullptr || hex == nullptr || hex[0] == '\0') {
+        return nullptr;
+    }
+
+    AircraftTrack *oldest = &aircraftTracks[0];
+    for (size_t i = 0; i < MAX_AIRCRAFT; i++) {
+        if (!aircraftTracks[i].active) {
+            oldest = &aircraftTracks[i];
+            break;
+        }
+        if (aircraftTracks[i].lastSeenMs < oldest->lastSeenMs) {
+            oldest = &aircraftTracks[i];
+        }
+    }
+
+    *oldest = AircraftTrack();
+    strlcpy(oldest->hex, hex, sizeof(oldest->hex));
+    oldest->active = true;
+    return oldest;
+}
+
+static TrackPoint &latestTrackPoint(AircraftTrack &track) {
+    size_t index = (
+        static_cast<size_t>(track.start) + track.count - 1
+    ) % TRACK_POINTS_PER_AIRCRAFT;
+    return track.points[index];
+}
+
+static void appendTrackPoint(
+    AircraftTrack &track,
+    float lat,
+    float lon,
+    uint32_t receivedMs
+) {
+    size_t index = 0;
+    if (track.count < TRACK_POINTS_PER_AIRCRAFT) {
+        index = (
+            static_cast<size_t>(track.start) + track.count
+        ) % TRACK_POINTS_PER_AIRCRAFT;
+        track.count++;
+    } else {
+        track.start = static_cast<uint16_t>(
+            (track.start + 1) % TRACK_POINTS_PER_AIRCRAFT
+        );
+        index = (
+            static_cast<size_t>(track.start) + track.count - 1
+        ) % TRACK_POINTS_PER_AIRCRAFT;
+    }
+    track.points[index] = TrackPoint{lat, lon, receivedMs};
+}
+
+static void updateAircraftTrackLocked(const Aircraft &item, uint32_t now) {
+    if (aircraftTracks == nullptr || item.hex[0] == '\0') return;
+
+    AircraftTrack *track = findAircraftTrackLocked(item.hex);
+    if (track == nullptr) {
+        track = allocateAircraftTrackLocked(item.hex);
+    }
+    if (track == nullptr) return;
+
+    if (track->count > 0) {
+        TrackPoint &latest = latestTrackPoint(*track);
+        uint32_t elapsedMs = now - latest.receivedMs;
+        float movedKm = trackDistanceKm(latest.lat, latest.lon, item.lat, item.lon);
+        bool breakTrack = elapsedMs > TRACK_BREAK_GAP_MS;
+        if (!breakTrack && elapsedMs > 0) {
+            float elapsedHours = static_cast<float>(elapsedMs) / 3600000.0f;
+            float impliedKnots = (movedKm / KM_PER_NM) / elapsedHours;
+            breakTrack = impliedKnots > TRACK_MAX_PLAUSIBLE_SPEED_KNOTS;
+        }
+
+        if (breakTrack) {
+            track->start = 0;
+            track->count = 0;
+        } else if (movedKm < TRACK_MIN_POINT_DISTANCE_KM) {
+            track->lastSeenMs = now;
+            return;
+        }
+    }
+
+    appendTrackPoint(*track, item.lat, item.lon, now);
+    track->lastSeenMs = now;
+}
+
+static void updateAircraftTracksLocked(
+    const Aircraft *items,
+    size_t itemCount,
+    uint32_t now
+) {
+    if (aircraftTracks == nullptr) return;
+
+    for (size_t i = 0; i < itemCount; i++) {
+        updateAircraftTrackLocked(items[i], now);
+    }
+
+    for (size_t i = 0; i < MAX_AIRCRAFT; i++) {
+        AircraftTrack &track = aircraftTracks[i];
+        if (track.active && now - track.lastSeenMs > TRACK_STALE_MS) {
+            track = AircraftTrack();
+        }
+    }
+
+    if (selectedAircraftHex[0] != '\0') {
+        AircraftTrack *selected = findAircraftTrackLocked(selectedAircraftHex);
+        if (selected == nullptr ||
+            now - selected->lastSeenMs > TRACK_SELECTION_MISSING_MS) {
+            Serial.printf("[track] selection cleared missing=%s\n", selectedAircraftHex);
+            selectedAircraftHex[0] = '\0';
+        }
+    }
+}
+
+static size_t snapshotSelectedTrackLocked(TrackPoint *out, size_t outCapacity) {
+    if (out == nullptr || outCapacity == 0 || selectedAircraftHex[0] == '\0') {
+        return 0;
+    }
+
+    AircraftTrack *track = findAircraftTrackLocked(selectedAircraftHex);
+    if (track == nullptr) return 0;
+    size_t count = std::min<size_t>(track->count, outCapacity);
+    for (size_t i = 0; i < count; i++) {
+        size_t index = (
+            static_cast<size_t>(track->start) + i
+        ) % TRACK_POINTS_PER_AIRCRAFT;
+        out[i] = track->points[index];
+    }
+    return count;
 }
 
 static void presentScreenOrRestart() {
@@ -212,6 +417,10 @@ static uint16_t colorDim;
 static uint16_t colorPlane;
 static uint16_t colorRunway;
 static uint16_t colorWarn;
+static uint16_t colorTrackDim;
+static uint16_t colorTrackBright;
+static uint16_t colorTrackForecast;
+static uint16_t colorSelectedRow;
 
 enum class BootStatus : uint8_t {
     Pending,
@@ -704,7 +913,7 @@ static void handleRoot() {
     body += F("<small>The radar continues without a map if this is empty or the map request fails.</small></section>");
     body += F("<button class='save' type='submit'>Save and reboot</button></form>");
     body += F("<p><a href='/screenshot.bmp'>Download current screen BMP</a></p>");
-    body += F("<p><small>Short tap on radar: range preset. Long press: setup portal. Range is saved.</small></p>");
+    body += F("<p><small>Tap radar: range preset. Tap an aircraft row: toggle its track. Long press: setup portal. Range is saved.</small></p>");
     body += F("<p><small>Current IP: ");
     body += WiFi.localIP().toString();
     body += F(" AP: 192.168.4.1 Host: plane-radar.local</small></p>");
@@ -1409,10 +1618,11 @@ static bool fetchAdsb() {
             dst.trackDeg = pickHeading(plane, true);
             dst.gsKnots = pickSpeed(plane);
             dst.verticalRateFpm = pickVerticalRate(plane);
+            copyJsonStringTrimmed(plane, "hex", dst.hex, sizeof(dst.hex));
             copyJsonStringTrimmed(plane, "flight", dst.callsign, sizeof(dst.callsign));
             dst.hasFlight = dst.callsign[0] != '\0';
             if (!dst.hasFlight) {
-                copyJsonStringTrimmed(plane, "hex", dst.callsign, sizeof(dst.callsign));
+                strlcpy(dst.callsign, dst.hex, sizeof(dst.callsign));
             }
             copyJsonStringTrimmed(plane, "t", dst.type, sizeof(dst.type));
             copyJsonStringTrimmed(plane, "category", dst.category, sizeof(dst.category));
@@ -1430,6 +1640,7 @@ static bool fetchAdsb() {
         memcpy(aircraft, fetchedAircraft, fetchedCount * sizeof(Aircraft));
     }
     aircraftCount = fetchedCount;
+    updateAircraftTracksLocked(fetchedAircraft, fetchedCount, fetchNow);
     syncRouteCacheFromAircraft(fetchNow);
     lastFetchText = fetchStatus;
     networkDataDirty = true;
@@ -1526,6 +1737,180 @@ static void prepareAircraftGeometry(
     std::sort(items, items + itemCount, [](const Aircraft &a, const Aircraft &b) {
         return a.distanceKm > b.distanceKm;
     });
+}
+
+static bool clipTrackLineToMapViewport(int &x0, int &y0, int &x1, int &y1) {
+    float startX = static_cast<float>(x0);
+    float startY = static_cast<float>(y0);
+    float dx = static_cast<float>(x1 - x0);
+    float dy = static_cast<float>(y1 - y0);
+    float enter = 0.0f;
+    float leave = 1.0f;
+
+    auto clip = [&](float direction, float distance) {
+        if (fabsf(direction) < 0.0001f) {
+            return distance >= 0.0f;
+        }
+        float ratio = distance / direction;
+        if (direction < 0.0f) {
+            if (ratio > leave) return false;
+            enter = std::max(enter, ratio);
+        } else {
+            if (ratio < enter) return false;
+            leave = std::min(leave, ratio);
+        }
+        return true;
+    };
+
+    if (!clip(-dx, startX) ||
+        !clip(dx, static_cast<float>(PANEL_X - 1) - startX) ||
+        !clip(-dy, startY) ||
+        !clip(dy, static_cast<float>(SCREEN_H - 1) - startY)) {
+        return false;
+    }
+
+    x0 = static_cast<int>(lroundf(startX + enter * dx));
+    y0 = static_cast<int>(lroundf(startY + enter * dy));
+    x1 = static_cast<int>(lroundf(startX + leave * dx));
+    y1 = static_cast<int>(lroundf(startY + leave * dy));
+    return true;
+}
+
+static bool prepareTrackSegment(
+    bool useMapViewport,
+    bool startInsideRadar,
+    bool endInsideRadar,
+    int &x0,
+    int &y0,
+    int &x1,
+    int &y1
+) {
+    if (useMapViewport) {
+        return clipTrackLineToMapViewport(x0, y0, x1, y1);
+    }
+    return startInsideRadar && endInsideRadar;
+}
+
+template <typename Gfx>
+static void drawDashedTrackLine(
+    Gfx &g,
+    int x0,
+    int y0,
+    int x1,
+    int y1,
+    uint16_t color
+) {
+    float dx = static_cast<float>(x1 - x0);
+    float dy = static_cast<float>(y1 - y0);
+    float length = hypotf(dx, dy);
+    if (length < 1.0f) return;
+
+    static constexpr float DASH_LENGTH = 4.0f;
+    static constexpr float DASH_PERIOD = 8.0f;
+    for (float offset = 0.0f; offset < length; offset += DASH_PERIOD) {
+        float from = offset / length;
+        float to = std::min(length, offset + DASH_LENGTH) / length;
+        int dashX0 = x0 + static_cast<int>(lroundf(dx * from));
+        int dashY0 = y0 + static_cast<int>(lroundf(dy * from));
+        int dashX1 = x0 + static_cast<int>(lroundf(dx * to));
+        int dashY1 = y0 + static_cast<int>(lroundf(dy * to));
+        g.drawLine(dashX0, dashY0, dashX1, dashY1, color);
+    }
+}
+
+static const Aircraft *findAircraftByHex(
+    const Aircraft *items,
+    size_t itemCount,
+    const char *hex
+) {
+    if (hex == nullptr || hex[0] == '\0') return nullptr;
+    for (size_t i = 0; i < itemCount; i++) {
+        if (strcmp(items[i].hex, hex) == 0) {
+            return &items[i];
+        }
+    }
+    return nullptr;
+}
+
+template <typename Gfx>
+static void drawSelectedAircraftTrack(
+    Gfx &g,
+    const TrackPoint *points,
+    size_t pointCount,
+    const Aircraft *selectedAircraft,
+    bool useMapViewport
+) {
+    if (points == nullptr || pointCount == 0) return;
+
+    int previousX = 0;
+    int previousY = 0;
+    float previousDistanceKm = 0;
+    bool previousInsideRadar = toRadarPoint(
+        points[0].lat,
+        points[0].lon,
+        previousX,
+        previousY,
+        previousDistanceKm
+    );
+    size_t brightStart = pointCount > 18 ? pointCount - 18 : 1;
+
+    for (size_t i = 1; i < pointCount; i++) {
+        int x = 0;
+        int y = 0;
+        float distanceKm = 0;
+        bool insideRadar = toRadarPoint(
+            points[i].lat,
+            points[i].lon,
+            x,
+            y,
+            distanceKm
+        );
+        int lineX0 = previousX;
+        int lineY0 = previousY;
+        int lineX1 = x;
+        int lineY1 = y;
+        if (prepareTrackSegment(
+                useMapViewport,
+                previousInsideRadar,
+                insideRadar,
+                lineX0,
+                lineY0,
+                lineX1,
+                lineY1)) {
+            uint16_t color = i >= brightStart ? colorTrackBright : colorTrackDim;
+            g.drawLine(lineX0, lineY0, lineX1, lineY1, color);
+        }
+        previousX = x;
+        previousY = y;
+        previousInsideRadar = insideRadar;
+    }
+
+    if (selectedAircraft == nullptr) return;
+    int lineX0 = previousX;
+    int lineY0 = previousY;
+    int lineX1 = selectedAircraft->screenX;
+    int lineY1 = selectedAircraft->screenY;
+    bool forecastInsideRadar =
+        selectedAircraft->distanceKm <= activeOuterKm();
+    if (!prepareTrackSegment(
+            useMapViewport,
+            previousInsideRadar,
+            forecastInsideRadar,
+            lineX0,
+            lineY0,
+            lineX1,
+            lineY1)) {
+        return;
+    }
+    if (abs(lineX1 - lineX0) + abs(lineY1 - lineY0) < 2) return;
+    drawDashedTrackLine(
+        g,
+        lineX0,
+        lineY0,
+        lineX1,
+        lineY1,
+        colorTrackForecast
+    );
 }
 
 static bool isRotorcraft(const Aircraft &item) {
@@ -1667,10 +2052,13 @@ static void drawAircraftList(
     size_t itemCount,
     const RouteCacheEntry *routes,
     size_t routeCount,
-    const char *emptyStatus
+    const char *emptyStatus,
+    const char *selectedHex
 ) {
     g.fillRect(PANEL_X, 0, SCREEN_W - PANEL_X, SCREEN_H, colorBg);
     g.drawWideLine(PANEL_X - 8, 18, PANEL_X - 8, SCREEN_H - 18, 1.0f, colorGrid);
+    visibleListRowCount = 0;
+    memset(visibleListAircraftHex, 0, sizeof(visibleListAircraftHex));
 
     g.setTextDatum(textdatum_t::top_right);
     g.setTextSize(2);
@@ -1680,19 +2068,33 @@ static void drawAircraftList(
     g.drawString(rangeTitle, PANEL_RIGHT, 10);
 
     int textWidth = PANEL_RIGHT - PANEL_TEXT_X;
-    int maxRows = (SCREEN_H - PANEL_LIST_TOP - 4) / PANEL_ROW_H;
+    int maxRows = static_cast<int>(PANEL_MAX_ROWS);
     int drawn = 0;
     for (int idx = static_cast<int>(itemCount) - 1; idx >= 0 && drawn < maxRows; idx--) {
         const Aircraft &item = items[idx];
         int rowY = PANEL_LIST_TOP + drawn * PANEL_ROW_H;
         int iconX = PANEL_X + 20;
         int iconY = rowY + 23;
+        bool selected = selectedHex != nullptr &&
+            selectedHex[0] != '\0' &&
+            strcmp(item.hex, selectedHex) == 0;
+        uint16_t rowBg = selected ? colorSelectedRow : colorBg;
+        if (selected) {
+            g.fillRect(
+                PANEL_X + 1,
+                rowY - 2,
+                SCREEN_W - PANEL_X - 2,
+                PANEL_ROW_H - 1,
+                rowBg
+            );
+            g.fillRect(PANEL_X + 2, rowY - 2, 3, PANEL_ROW_H - 1, colorWarn);
+        }
 
         drawAircraftSymbol(g, item, iconX, iconY);
 
         g.setTextDatum(textdatum_t::top_left);
         g.setTextSize(2);
-        g.setTextColor(colorText, colorBg);
+        g.setTextColor(colorText, rowBg);
         g.drawString(item.callsign[0] ? item.callsign : "????", PANEL_TEXT_X, rowY);
 
         g.setTextSize(1);
@@ -1706,25 +2108,31 @@ static void drawAircraftList(
         appendTokenIfFits(g, detail, sizeof(detail), item.alt[0] ? item.alt : "ALT --", textWidth);
         appendTokenIfFits(g, detail, sizeof(detail), item.vsi, textWidth);
         appendTokenIfFits(g, detail, sizeof(detail), speed, textWidth);
-        g.setTextColor(colorDim, colorBg);
+        g.setTextColor(colorDim, rowBg);
         g.drawString(detail, PANEL_TEXT_X, rowY + 20);
 
         const char *squawkAlert = squawkAlertLabel(item.squawk);
         if (squawkAlert != nullptr) {
             char alert[32];
             snprintf(alert, sizeof(alert), "%s %s", item.squawk, squawkAlert);
-            g.setTextColor(colorWarn, colorBg);
+            g.setTextColor(colorWarn, rowBg);
             g.drawString(alert, PANEL_TEXT_X, rowY + 32);
         } else {
             char route[64];
             if (routeLabelForCallsign(
                     g, routes, routeCount, item.callsign, textWidth, route, sizeof(route))) {
-                g.setTextColor(colorRunway, colorBg);
+                g.setTextColor(colorRunway, rowBg);
                 g.drawString(route, PANEL_TEXT_X, rowY + 32);
             }
         }
 
         g.drawWideLine(PANEL_X + PANEL_PAD, rowY + PANEL_ROW_H - 4, PANEL_RIGHT, rowY + PANEL_ROW_H - 4, 1.0f, colorGrid);
+        strlcpy(
+            visibleListAircraftHex[drawn],
+            item.hex,
+            sizeof(visibleListAircraftHex[drawn])
+        );
+        visibleListRowCount = static_cast<size_t>(drawn + 1);
         drawn++;
     }
 
@@ -1741,7 +2149,9 @@ static void drawRadar() {
     drawCounter++;
 
     size_t renderCount = 0;
+    size_t renderTrackCount = 0;
     char emptyStatus[64];
+    char renderSelectedHex[7] = {};
     size_t renderRangeIndex = 0;
     lockState();
     renderCount = aircraftCount;
@@ -1749,6 +2159,15 @@ static void drawRadar() {
         memcpy(renderAircraft, aircraft, renderCount * sizeof(Aircraft));
     }
     memcpy(renderRouteCache, routeCache, sizeof(renderRouteCache));
+    strlcpy(
+        renderSelectedHex,
+        selectedAircraftHex,
+        sizeof(renderSelectedHex)
+    );
+    renderTrackCount = snapshotSelectedTrackLocked(
+        renderTrack,
+        TRACK_POINTS_PER_AIRCRAFT
+    );
     strlcpy(emptyStatus, statusText.c_str(), sizeof(emptyStatus));
     renderRangeIndex = rangeIndex;
     unlockState();
@@ -1771,6 +2190,18 @@ static void drawRadar() {
         g.fillScreen(colorBg);
     }
     prepareAircraftGeometry(renderAircraft, renderCount, mapVisible);
+    const Aircraft *selectedAircraft = findAircraftByHex(
+        renderAircraft,
+        renderCount,
+        renderSelectedHex
+    );
+    drawSelectedAircraftTrack(
+        g,
+        renderTrack,
+        renderTrackCount,
+        selectedAircraft,
+        mapVisible
+    );
     int cx = RADAR_CX;
     int cy = RADAR_CY;
     int radius = RADAR_RADIUS;
@@ -1897,7 +2328,8 @@ static void drawRadar() {
         renderCount,
         renderRouteCache,
         MAX_ROUTE_CACHE,
-        emptyStatus
+        emptyStatus,
+        renderSelectedHex
     );
 
     g.endWrite();
@@ -1913,6 +2345,57 @@ static void drawRadar() {
     }
 }
 
+static bool handleAircraftListTap(uint16_t x, uint16_t y) {
+    if (x < PANEL_X) {
+        return false;
+    }
+    if (y < PANEL_LIST_TOP) {
+        return true;
+    }
+
+    size_t row = static_cast<size_t>((y - PANEL_LIST_TOP) / PANEL_ROW_H);
+    if (row >= visibleListRowCount || row >= PANEL_MAX_ROWS) {
+        return true;
+    }
+
+    char tappedHex[7] = {};
+    strlcpy(tappedHex, visibleListAircraftHex[row], sizeof(tappedHex));
+    if (tappedHex[0] == '\0') {
+        return true;
+    }
+
+    bool selected = false;
+    bool changed = false;
+    lockState();
+    if (strcmp(selectedAircraftHex, tappedHex) == 0) {
+        selectedAircraftHex[0] = '\0';
+        changed = true;
+    } else if (findAircraftTrackLocked(tappedHex) != nullptr) {
+        strlcpy(
+            selectedAircraftHex,
+            tappedHex,
+            sizeof(selectedAircraftHex)
+        );
+        selected = true;
+        changed = true;
+    }
+    if (changed) {
+        networkDataDirty = true;
+    }
+    unlockState();
+
+    if (changed) {
+        Serial.printf(
+            "[track] %s hex=%s row=%u\n",
+            selected ? "selected" : "cleared",
+            tappedHex,
+            static_cast<unsigned>(row)
+        );
+        Serial.flush();
+    }
+    return true;
+}
+
 static void handleTouch() {
     uint16_t x = 0;
     uint16_t y = 0;
@@ -1920,7 +2403,15 @@ static void handleTouch() {
     uint32_t now = millis();
     if (down && !touchWasDown) {
         touchDownMs = now;
+        touchDownX = x;
+        touchDownY = y;
+        touchLastX = x;
+        touchLastY = y;
         longPressHandled = false;
+    }
+    if (down) {
+        touchLastX = x;
+        touchLastY = y;
     }
     if (down && !longPressHandled && now - touchDownMs >= TOUCH_LONG_PRESS_MS) {
         longPressHandled = true;
@@ -1932,7 +2423,14 @@ static void handleTouch() {
     }
     if (!down && touchWasDown) {
         uint32_t held = now - touchDownMs;
-        if (!longPressHandled && held >= TOUCH_TAP_MIN_MS && held < TOUCH_LONG_PRESS_MS) {
+        int movedX = abs(static_cast<int>(touchLastX) - touchDownX);
+        int movedY = abs(static_cast<int>(touchLastY) - touchDownY);
+        bool tap = !longPressHandled &&
+            held >= TOUCH_TAP_MIN_MS &&
+            held < TOUCH_LONG_PRESS_MS &&
+            movedX <= TOUCH_TAP_MOVE_MAX_PX &&
+            movedY <= TOUCH_TAP_MOVE_MAX_PX;
+        if (tap && !handleAircraftListTap(touchDownX, touchDownY)) {
             lockState();
             rangeIndex = (rangeIndex + 1) % RANGE_COUNT;
             forceAdsbFetch = true;
@@ -2017,6 +2515,10 @@ static void initPalette() {
     colorPlane = screen.color565(255, 55, 80);
     colorRunway = screen.color565(66, 210, 210);
     colorWarn = screen.color565(255, 220, 70);
+    colorTrackDim = screen.color565(84, 78, 30);
+    colorTrackBright = screen.color565(210, 176, 42);
+    colorTrackForecast = screen.color565(125, 108, 42);
+    colorSelectedRow = screen.color565(5, 28, 19);
 }
 
 void setup() {
@@ -2043,6 +2545,7 @@ void setup() {
         }
     }
     logStep("display end");
+    initAircraftTrackCache();
     resetBootScreen();
     setBootStage(BOOT_LCD, BootStatus::Ok);
 

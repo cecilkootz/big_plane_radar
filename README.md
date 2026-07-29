@@ -34,7 +34,10 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
 - saved Wi-Fi, radar center, units, airport overlay, aircraft symbol style,
   aircraft label, map brightness, and range settings in NVS;
 - ADS-B data from `https://opendata.adsb.fi/api/v3/`;
-- local dead-reckoning between ADS-B updates, redrawn at about `4 FPS`;
+- local dead-reckoning between 5-second ADS-B updates, redrawn continuously;
+- up to 10 minutes of confirmed positions are retained per aircraft in PSRAM;
+  tap an aircraft row to toggle its track, while the extrapolated final segment
+  remains temporary and is never committed to history;
 - optional route city line in the aircraft list via cached callsign lookups from
   `https://api.adsbdb.com/`;
 - optional Stadia Maps `Alidade Smooth Dark` raster background, with a complete
@@ -57,7 +60,8 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
   their 5-degree rotation frames are precomputed in flash and alpha-blended
   directly into the RGB565 framebuffer;
 - background Wi-Fi reconnect after router/power outages;
-- touch controls: short tap cycles range, long press starts the setup portal;
+- touch controls: tap the radar to cycle range, tap an aircraft row to toggle
+  its track, and long press to start the setup portal;
 - boot setup window: hold the screen during startup to force the setup portal;
 - screenshot endpoint: `/screenshot` and `/screenshot.bmp`;
 - conservative RGB LCD settings for this panel: `14 MHz` PCLK and `800 * 10`
