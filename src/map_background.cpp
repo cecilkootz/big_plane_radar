@@ -1,4 +1,5 @@
 #include "map_background.h"
+#include "app_log.h"
 
 #include <HTTPClient.h>
 #include <PNGdec.h>
@@ -15,6 +16,7 @@ static constexpr char STADIA_STATIC_MAP_URL[] =
 static constexpr uint32_t MAP_HTTP_TIMEOUT_MS = 20000;
 static constexpr size_t MAP_MAX_PNG_BYTES = 1024 * 1024;
 static constexpr int MAP_MAX_SOURCE_WIDTH = 1040;
+static constexpr unsigned MAP_DOWNLOAD_PROGRESS_STEPS = 10;
 // Stadia Static Maps uses a 512-point world at zoom 0, unlike classic 256px XYZ tiles.
 static constexpr double STADIA_METERS_PER_POINT_Z0 = 78271.51696402048;
 
@@ -187,25 +189,53 @@ static int drawPngLine(PNGDRAW *draw) {
     return 1;
 }
 
-static bool readHttpBody(HTTPClient &http, uint8_t *&data, size_t &size) {
+static void emitProgress(
+    LoadProgress &progress,
+    LoadPhase phase,
+    LoadProgressCallback callback,
+    void *context,
+    const char *error = nullptr
+) {
+    progress.phase = phase;
+    progress.error = error;
+    if (callback != nullptr) {
+        callback(progress, context);
+    }
+}
+
+static bool readHttpBody(
+    HTTPClient &http,
+    uint8_t *&data,
+    size_t &size,
+    LoadProgress &progress,
+    LoadProgressCallback callback,
+    void *context
+) {
     int contentLength = http.getSize();
     if (contentLength <= 0 || static_cast<size_t>(contentLength) > MAP_MAX_PNG_BYTES) {
-        Serial.printf("[map] invalid content length=%d\n", contentLength);
+        RADAR_LOGE("[map] invalid content length=%d\n", contentLength);
+        emitProgress(progress, LoadPhase::Error, callback, context, "INVALID CONTENT LENGTH");
         return false;
     }
+
+    progress.totalBytes = static_cast<size_t>(contentLength);
+    progress.receivedBytes = 0;
+    emitProgress(progress, LoadPhase::Download, callback, context);
 
     data = static_cast<uint8_t *>(heap_caps_malloc(
         static_cast<size_t>(contentLength),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
     ));
     if (data == nullptr) {
-        Serial.printf("[map] PNG allocation failed bytes=%d\n", contentLength);
+        RADAR_LOGE("[map] PNG allocation failed bytes=%d\n", contentLength);
+        emitProgress(progress, LoadPhase::Error, callback, context, "PNG ALLOCATION FAILED");
         return false;
     }
 
     auto *stream = http.getStreamPtr();
     size_t received = 0;
     uint32_t lastProgressMs = millis();
+    unsigned lastProgressStep = 0;
     while (received < static_cast<size_t>(contentLength)) {
         int available = stream->available();
         if (available > 0) {
@@ -217,6 +247,15 @@ static bool readHttpBody(HTTPClient &http, uint8_t *&data, size_t &size) {
             if (count > 0) {
                 received += static_cast<size_t>(count);
                 lastProgressMs = millis();
+                unsigned progressStep = static_cast<unsigned>(
+                    (received * MAP_DOWNLOAD_PROGRESS_STEPS) /
+                    static_cast<size_t>(contentLength)
+                );
+                if (progressStep > lastProgressStep) {
+                    lastProgressStep = progressStep;
+                    progress.receivedBytes = received;
+                    emitProgress(progress, LoadPhase::Download, callback, context);
+                }
                 continue;
             }
         }
@@ -228,13 +267,17 @@ static bool readHttpBody(HTTPClient &http, uint8_t *&data, size_t &size) {
     }
 
     if (received != static_cast<size_t>(contentLength)) {
-        Serial.printf("[map] short response bytes=%u/%d\n",
-                      static_cast<unsigned>(received), contentLength);
+        RADAR_LOGE("[map] short response bytes=%u/%d\n",
+                   static_cast<unsigned>(received), contentLength);
+        progress.receivedBytes = received;
+        emitProgress(progress, LoadPhase::Error, callback, context, "INCOMPLETE DOWNLOAD");
         heap_caps_free(data);
         data = nullptr;
         return false;
     }
     size = received;
+    progress.receivedBytes = received;
+    emitProgress(progress, LoadPhase::Download, callback, context);
     return true;
 }
 
@@ -267,7 +310,7 @@ static bool decodePng(
     ));
     if (decoderStorage == nullptr || sourceLine0 == nullptr ||
         sourceLine1 == nullptr || sourceX == nullptr) {
-        Serial.println("[map] decoder allocation failed");
+        RADAR_LOGE("[map] decoder allocation failed\n");
         if (sourceX != nullptr) heap_caps_free(sourceX);
         if (sourceLine1 != nullptr) heap_caps_free(sourceLine1);
         if (sourceLine0 != nullptr) heap_caps_free(sourceLine0);
@@ -302,8 +345,8 @@ static bool decodePng(
         !decoder->isInterlaced()) {
         result = decoder->decode(&context, PNG_FAST_PALETTE);
     } else if (result == PNG_SUCCESS) {
-        Serial.printf("[map] unexpected PNG %dx%d interlaced=%d\n",
-                      decoder->getWidth(), decoder->getHeight(), decoder->isInterlaced());
+        RADAR_LOGE("[map] unexpected PNG %dx%d interlaced=%d\n",
+                   decoder->getWidth(), decoder->getHeight(), decoder->isInterlaced());
         result = PNG_INVALID_FILE;
     }
     decoder->close();
@@ -314,8 +357,8 @@ static bool decodePng(
     heap_caps_free(decoderStorage);
 
     if (result != PNG_SUCCESS || context.nextDestinationY != destinationHeight) {
-        Serial.printf("[map] PNG decode failed code=%d rows=%d/%d\n",
-                      result, context.nextDestinationY, destinationHeight);
+        RADAR_LOGE("[map] PNG decode failed code=%d rows=%d/%d\n",
+                   result, context.nextDestinationY, destinationHeight);
         return false;
     }
     return true;
@@ -344,9 +387,9 @@ bool Background::begin(int width, int height, size_t viewCount) {
                 heap_caps_free(_buffers[allocated]);
                 _buffers[allocated] = nullptr;
             }
-            Serial.printf("[map] framebuffer allocation failed views=%u bytes=%u\n",
-                          static_cast<unsigned>(viewCount),
-                          static_cast<unsigned>(bytes * viewCount));
+            RADAR_LOGE("[map] framebuffer allocation failed views=%u bytes=%u\n",
+                       static_cast<unsigned>(viewCount),
+                       static_cast<unsigned>(bytes * viewCount));
             return false;
         }
     }
@@ -354,12 +397,12 @@ bool Background::begin(int width, int height, size_t viewCount) {
     _height = height;
     _viewCount = viewCount;
     memset(_ready, 0, sizeof(_ready));
-    Serial.printf("[map] cache ready size=%dx%d views=%u bytes=%u free_psram=%u\n",
-                  width,
-                  height,
-                  static_cast<unsigned>(viewCount),
-                  static_cast<unsigned>(bytes * viewCount),
-                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    RADAR_LOGI("[map] cache ready size=%dx%d views=%u bytes=%u free_psram=%u\n",
+               width,
+               height,
+               static_cast<unsigned>(viewCount),
+               static_cast<unsigned>(bytes * viewCount),
+               static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
     return true;
 }
 
@@ -370,7 +413,9 @@ bool Background::fetchStadia(
     int radarRadius,
     const String &apiKey,
     uint8_t brightnessPercent,
-    size_t viewIndex
+    size_t viewIndex,
+    LoadProgressCallback progressCallback,
+    void *progressContext
 ) {
     if (viewIndex >= _viewCount || _buffers[viewIndex] == nullptr || apiKey.isEmpty()) {
         return false;
@@ -387,12 +432,28 @@ bool Background::fetchStadia(
         _width,
         _height
     );
+    LoadProgress progress;
+    progress.viewIndex = viewIndex;
+    progress.zoom = geometry.zoom;
+    progress.sourceWidth = geometry.sourceWidth;
+    progress.sourceHeight = geometry.sourceHeight;
+    progress.destinationWidth = _width;
+    progress.destinationHeight = _height;
     if (geometry.sourceWidth > MAP_MAX_SOURCE_WIDTH ||
         geometry.sourceHeight > MAP_MAX_SOURCE_WIDTH) {
-        Serial.printf("[map] source dimensions too large %dx%d\n",
-                      geometry.sourceWidth, geometry.sourceHeight);
+        RADAR_LOGE("[map] source dimensions too large %dx%d\n",
+                   geometry.sourceWidth, geometry.sourceHeight);
+        emitProgress(
+            progress,
+            LoadPhase::Error,
+            progressCallback,
+            progressContext,
+            "SOURCE DIMENSIONS TOO LARGE"
+        );
         return false;
     }
+
+    emitProgress(progress, LoadPhase::Request, progressCallback, progressContext);
 
     char url[256];
     snprintf(url,
@@ -405,36 +466,60 @@ bool Background::fetchStadia(
              geometry.sourceWidth,
              geometry.sourceHeight);
 
-    Serial.printf("[map] fetch begin view=%u zoom=%d source=%dx%d\n",
-                  static_cast<unsigned>(viewIndex),
-                  geometry.zoom,
-                  geometry.sourceWidth,
-                  geometry.sourceHeight);
+    RADAR_LOGD("[map] fetch begin view=%u zoom=%d source=%dx%d\n",
+               static_cast<unsigned>(viewIndex),
+               geometry.zoom,
+               geometry.sourceWidth,
+               geometry.sourceHeight);
     WiFiClientSecure client;
     client.setInsecure();
     HTTPClient http;
     http.setTimeout(MAP_HTTP_TIMEOUT_MS);
     if (!http.begin(client, url)) {
-        Serial.println("[map] HTTP begin failed");
+        RADAR_LOGE("[map] HTTP begin failed\n");
+        emitProgress(
+            progress,
+            LoadPhase::Error,
+            progressCallback,
+            progressContext,
+            "HTTP BEGIN FAILED"
+        );
         return false;
     }
     String authorization = F("Stadia-Auth ");
     authorization += apiKey;
     http.addHeader(F("Authorization"), authorization);
     int status = http.GET();
+    progress.httpStatus = status;
+    emitProgress(progress, LoadPhase::Response, progressCallback, progressContext);
     if (status != HTTP_CODE_OK) {
-        Serial.printf("[map] HTTP status=%d\n", status);
+        RADAR_LOGE("[map] HTTP status=%d\n", status);
+        emitProgress(
+            progress,
+            LoadPhase::Error,
+            progressCallback,
+            progressContext,
+            "HTTP REQUEST FAILED"
+        );
         http.end();
         return false;
     }
 
     uint8_t *pngData = nullptr;
     size_t pngSize = 0;
-    bool downloaded = readHttpBody(http, pngData, pngSize);
+    bool downloaded = readHttpBody(
+        http,
+        pngData,
+        pngSize,
+        progress,
+        progressCallback,
+        progressContext
+    );
     http.end();
     if (!downloaded) return false;
 
     uint32_t decodeStartedMs = millis();
+    emitProgress(progress, LoadPhase::Decode, progressCallback, progressContext);
     bool decoded = decodePng(
         pngData,
         pngSize,
@@ -446,15 +531,26 @@ bool Background::fetchStadia(
         brightnessPercent
     );
     heap_caps_free(pngData);
-    if (!decoded) return false;
+    progress.decodeMs = millis() - decodeStartedMs;
+    if (!decoded) {
+        emitProgress(
+            progress,
+            LoadPhase::Error,
+            progressCallback,
+            progressContext,
+            "PNG DECODE FAILED"
+        );
+        return false;
+    }
 
     xSemaphoreTake(_mutex, portMAX_DELAY);
     _ready[viewIndex] = true;
     xSemaphoreGive(_mutex);
-    Serial.printf("[map] ready view=%u png=%u decode_ms=%lu\n",
-                  static_cast<unsigned>(viewIndex),
-                  static_cast<unsigned>(pngSize),
-                  static_cast<unsigned long>(millis() - decodeStartedMs));
+    RADAR_LOGD("[map] ready view=%u png=%u decode_ms=%lu\n",
+               static_cast<unsigned>(viewIndex),
+               static_cast<unsigned>(pngSize),
+               static_cast<unsigned long>(progress.decodeMs));
+    emitProgress(progress, LoadPhase::Ready, progressCallback, progressContext);
     return true;
 }
 

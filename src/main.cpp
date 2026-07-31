@@ -12,6 +12,7 @@
 #include <math.h>
 
 #include "aircraft_icons.h"
+#include "app_log.h"
 #include "airport_catalog.h"
 #include "map_background.h"
 #include "panel_display.h"
@@ -255,17 +256,15 @@ static bool initAircraftTrackCache() {
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
     ));
     if (aircraftTracks == nullptr) {
-        Serial.printf("[track] PSRAM allocation failed bytes=%u; tracks disabled\n",
-                      static_cast<unsigned>(bytes));
-        Serial.flush();
+        RADAR_LOGE("[track] PSRAM allocation failed bytes=%u; tracks disabled\n",
+                   static_cast<unsigned>(bytes));
         return false;
     }
 
-    Serial.printf("[track] cache ready tracks=%u points=%u bytes=%u\n",
-                  static_cast<unsigned>(MAX_AIRCRAFT),
-                  static_cast<unsigned>(TRACK_POINTS_PER_AIRCRAFT),
-                  static_cast<unsigned>(bytes));
-    Serial.flush();
+    RADAR_LOGD("[track] cache ready tracks=%u points=%u bytes=%u\n",
+               static_cast<unsigned>(MAX_AIRCRAFT),
+               static_cast<unsigned>(TRACK_POINTS_PER_AIRCRAFT),
+               static_cast<unsigned>(bytes));
     return true;
 }
 
@@ -380,15 +379,14 @@ static void selectConfiguredAirports() {
         config.manualAirportIcao,
         selectedAirports
     );
-    Serial.printf("[airport] mode=%u selected=%u radius_km=%u",
-                  static_cast<unsigned>(config.airportSelectionMode),
-                  static_cast<unsigned>(selectedAirportCount),
-                  static_cast<unsigned>(config.airportRadiusKm));
+    RADAR_LOGD("[airport] mode=%u selected=%u radius_km=%u",
+               static_cast<unsigned>(config.airportSelectionMode),
+               static_cast<unsigned>(selectedAirportCount),
+               static_cast<unsigned>(config.airportRadiusKm));
     for (size_t i = 0; i < selectedAirportCount; i++) {
-        Serial.printf(" %s=%.1fkm", selectedAirports[i].airport->icao, selectedAirports[i].distanceKm);
+        RADAR_LOGD(" %s=%.1fkm", selectedAirports[i].airport->icao, selectedAirports[i].distanceKm);
     }
-    Serial.println();
-    Serial.flush();
+    RADAR_LOGD("\n");
 }
 
 static AircraftTrack *findAircraftTrackLocked(const char *hex) {
@@ -510,7 +508,7 @@ static void updateAircraftTracksLocked(
         AircraftTrack *selected = findAircraftTrackLocked(selectedAircraftHex);
         if (selected == nullptr ||
             now - selected->lastSeenMs > TRACK_SELECTION_MISSING_MS) {
-            Serial.printf("[track] selection cleared missing=%s\n", selectedAircraftHex);
+            RADAR_LOGD("[track] selection cleared missing=%s\n", selectedAircraftHex);
             selectedAircraftHex[0] = '\0';
         }
     }
@@ -537,8 +535,8 @@ static void presentScreenOrRestart() {
     if (screen.present()) {
         return;
     }
-    Serial.println("[display] unrecoverable framebuffer synchronization failure; restarting");
-    Serial.flush();
+    RADAR_LOGE("[display] unrecoverable framebuffer synchronization failure; restarting\n");
+    RADAR_LOGE_FLUSH();
     delay(100);
     ESP.restart();
 }
@@ -584,8 +582,8 @@ enum BootStageId : uint8_t {
     BOOT_PALETTE,
     BOOT_CONFIG,
     BOOT_WIFI,
-    BOOT_MAP,
     BOOT_SERVICES,
+    BOOT_MAP,
     BOOT_DATA,
     BOOT_INTERFACE,
     BOOT_STAGE_COUNT,
@@ -594,32 +592,31 @@ enum BootStageId : uint8_t {
 struct BootStage {
     const char *label;
     BootStatus status;
-    char detail[12];
+    char details[4][88];
+    uint8_t detailCount;
+    uint32_t startedMs;
+    uint32_t elapsedMs;
+    bool revealed;
 };
 
 static BootStage bootStages[BOOT_STAGE_COUNT] = {
-    {"LCD INIT", BootStatus::Pending, {}},
-    {"PALETTE", BootStatus::Pending, {}},
-    {"CONFIG LOAD", BootStatus::Pending, {}},
-    {"WIFI CONNECTION", BootStatus::Pending, {}},
-    {"MAP CACHE", BootStatus::Pending, {}},
-    {"WEB SERVICES", BootStatus::Pending, {}},
-    {"ADSB DATA", BootStatus::Pending, {}},
-    {"INTERFACE", BootStatus::Pending, {}},
+    {"LCD INIT", BootStatus::Pending, {}, 0, 0, 0, false},
+    {"PALETTE", BootStatus::Pending, {}, 0, 0, 0, false},
+    {"CONFIG LOAD", BootStatus::Pending, {}, 0, 0, 0, false},
+    {"WIFI CONNECTION", BootStatus::Pending, {}, 0, 0, 0, false},
+    {"WEB SERVICES", BootStatus::Pending, {}, 0, 0, 0, false},
+    {"TILE CACHE", BootStatus::Pending, {}, 0, 0, 0, false},
+    {"ADSB DATA", BootStatus::Pending, {}, 0, 0, 0, false},
+    {"INTERFACE", BootStatus::Pending, {}, 0, 0, 0, false},
 };
 static bool bootScreenActive = false;
 
 static void logLine(const String &message) {
-    Serial.println(message);
-    Serial.flush();
+    RADAR_LOGD("%s\n", message.c_str());
 }
 
 static void logStep(const char *step) {
-    Serial.print("[boot] ");
-    Serial.print(millis());
-    Serial.print(" ms ");
-    Serial.println(step);
-    Serial.flush();
+    RADAR_LOGD("[boot] %lu ms %s\n", static_cast<unsigned long>(millis()), step);
 }
 
 static float activeOuterKm() {
@@ -653,7 +650,7 @@ static void setStatus(const String &text) {
     statusText = text;
     networkDataDirty = true;
     unlockState();
-    Serial.println("[status] " + text);
+    RADAR_LOGD("[status] %s\n", text.c_str());
 }
 
 static const char *bootStatusLabel(BootStatus status) {
@@ -680,25 +677,81 @@ static uint16_t bootStatusColor(BootStatus status) {
     }
 }
 
-static void drawBootStageLine(const BootStage &stage, int y) {
-    const int left = 54;
-    const int statusX = 650;
+static bool bootStageShowsDetails(const BootStage &stage) {
+    return stage.detailCount > 0 && (
+        stage.status == BootStatus::Running ||
+        stage.status == BootStatus::Fail ||
+        stage.status == BootStatus::Skip ||
+        stage.status == BootStatus::NoKey
+    );
+}
+
+static int bootStageHeight(const BootStage &stage) {
+    return 24 + (bootStageShowsDetails(stage) ? stage.detailCount * 12 : 0);
+}
+
+static void formatBootStageStatus(const BootStage &stage, char *out, size_t outLen) {
+    if (outLen == 0) return;
+    const char *label = bootStatusLabel(stage.status);
+    if (stage.status == BootStatus::Running || stage.elapsedMs == 0) {
+        strlcpy(out, label, outLen);
+        return;
+    }
+    if (stage.elapsedMs < 1000) {
+        snprintf(out, outLen, "%s %lums", label,
+                 static_cast<unsigned long>(stage.elapsedMs));
+    } else {
+        snprintf(out, outLen, "%s %.1fs", label, stage.elapsedMs / 1000.0f);
+    }
+}
+
+static void drawBootStageLine(const BootStage &stage, uint8_t index, int y) {
+    const int numberX = 48;
+    const int labelX = 78;
+    const int statusRight = 748;
     uint16_t bootBg = screen.color565(1, 6, 5);
     uint16_t bootText = screen.color565(230, 255, 235);
+    uint16_t bootDim = screen.color565(95, 165, 125);
     uint16_t bootDots = screen.color565(35, 75, 55);
 
     screen.setTextDatum(textdatum_t::top_left);
-    screen.setTextSize(2);
-    screen.setTextColor(bootText, bootBg);
-    screen.drawString(stage.label, left, y);
+    screen.setTextSize(1);
+    screen.setTextColor(bootDim, bootBg);
+    char stageNumber[4];
+    snprintf(stageNumber, sizeof(stageNumber), "%02u", static_cast<unsigned>(index + 1));
+    screen.drawString(stageNumber, numberX, y + 2);
 
-    int dotX = left + screen.textWidth(stage.label) + 16;
-    for (int x = dotX; x < statusX - 18; x += 14) {
-        screen.fillRect(x, y + 12, 4, 4, bootDots);
+    screen.setTextColor(bootText, bootBg);
+    screen.drawMediumString(stage.label, labelX, y);
+
+    char status[24];
+    formatBootStageStatus(stage, status, sizeof(status));
+    int dotX = labelX + screen.mediumTextWidth(stage.label) + 16;
+    int statusLeft = statusRight - screen.mediumTextWidth(status);
+    for (int x = dotX; x < statusLeft - 14; x += 12) {
+        screen.fillRect(x, y + 6, 3, 2, bootDots);
     }
 
     screen.setTextColor(bootStatusColor(stage.status), bootBg);
-    screen.drawString(stage.detail[0] != '\0' ? stage.detail : bootStatusLabel(stage.status), statusX, y);
+    screen.setTextDatum(textdatum_t::top_right);
+    screen.drawMediumString(status, statusRight, y);
+
+    if (!bootStageShowsDetails(stage)) return;
+
+    uint16_t detailColor = bootDim;
+    if (stage.status == BootStatus::Fail) {
+        detailColor = screen.color565(255, 115, 125);
+    } else if (stage.status == BootStatus::Skip || stage.status == BootStatus::NoKey) {
+        detailColor = screen.color565(205, 165, 85);
+    }
+    screen.setTextDatum(textdatum_t::top_left);
+    screen.setTextSize(1);
+    screen.setTextColor(detailColor, bootBg);
+    for (uint8_t line = 0; line < stage.detailCount; line++) {
+        int detailY = y + 17 + line * 12;
+        screen.drawString(">", labelX + 8, detailY);
+        screen.drawString(stage.details[line], labelX + 24, detailY);
+    }
 }
 
 static void drawBootScreen() {
@@ -709,18 +762,53 @@ static void drawBootScreen() {
 
     screen.fillScreen(bootBg);
     screen.setTextDatum(textdatum_t::top_left);
-    screen.setTextSize(4);
+    screen.setTextSize(3);
     screen.setTextColor(bootTitle, bootBg);
-    screen.drawString("PLANE RADAR", 48, 34);
-    screen.setTextSize(2);
+    screen.drawString("PLANE RADAR", 48, 24);
+    screen.setTextSize(1);
     screen.setTextColor(bootDim, bootBg);
-    screen.drawString("BOOT SEQUENCE", 54, 90);
-    screen.drawWideLine(54, 122, 746, 122, 1.0f, bootLine);
+    screen.drawString("BOOT LOG / ESP32-S3 / 240MHZ", 52, 62);
+    screen.drawWideLine(52, 82, 748, 82, 1.0f, bootLine);
 
-    for (uint8_t i = 0; i < BOOT_STAGE_COUNT; i++) {
-        drawBootStageLine(bootStages[i], 142 + i * 36);
+    uint8_t visibleCount = 0;
+    while (visibleCount < BOOT_STAGE_COUNT && bootStages[visibleCount].revealed) {
+        visibleCount++;
     }
 
+    const int contentTop = 100;
+    const int contentBottom = 426;
+    int totalHeight = 0;
+    for (uint8_t i = 0; i < visibleCount; i++) {
+        totalHeight += bootStageHeight(bootStages[i]);
+    }
+
+    uint8_t firstVisible = 0;
+    while (firstVisible + 1 < visibleCount &&
+           totalHeight > contentBottom - contentTop) {
+        totalHeight -= bootStageHeight(bootStages[firstVisible]);
+        firstVisible++;
+    }
+    while (firstVisible + 1 < visibleCount && firstVisible > 0 &&
+           totalHeight > contentBottom - contentTop - 16) {
+        totalHeight -= bootStageHeight(bootStages[firstVisible]);
+        firstVisible++;
+    }
+
+    int y = contentTop;
+    if (firstVisible > 0) {
+        char hidden[32];
+        snprintf(hidden, sizeof(hidden), "... %u EARLIER STAGES", static_cast<unsigned>(firstVisible));
+        screen.setTextSize(1);
+        screen.setTextColor(bootDim, bootBg);
+        screen.drawString(hidden, 52, y);
+        y += 16;
+    }
+    for (uint8_t i = firstVisible; i < visibleCount; i++) {
+        drawBootStageLine(bootStages[i], i, y);
+        y += bootStageHeight(bootStages[i]);
+    }
+
+    screen.setTextDatum(textdatum_t::top_left);
     screen.setTextSize(1);
     screen.setTextColor(bootDim, bootBg);
     screen.drawString("LONG PRESS SCREEN FOR SETUP", 54, 444);
@@ -730,55 +818,231 @@ static void drawBootScreen() {
 static void resetBootScreen() {
     for (uint8_t i = 0; i < BOOT_STAGE_COUNT; i++) {
         bootStages[i].status = BootStatus::Pending;
-        bootStages[i].detail[0] = '\0';
+        memset(bootStages[i].details, 0, sizeof(bootStages[i].details));
+        bootStages[i].detailCount = 0;
+        bootStages[i].startedMs = 0;
+        bootStages[i].elapsedMs = 0;
+        bootStages[i].revealed = false;
     }
+    bootStages[BOOT_LCD].status = BootStatus::Running;
+    bootStages[BOOT_LCD].startedMs = millis();
+    bootStages[BOOT_LCD].revealed = true;
+    strlcpy(bootStages[BOOT_LCD].details[0], "FRAMEBUFFER 800X480 RGB565", sizeof(bootStages[BOOT_LCD].details[0]));
+    strlcpy(bootStages[BOOT_LCD].details[1], "RGB PANEL / GT911 TOUCH / DOUBLE BUFFER", sizeof(bootStages[BOOT_LCD].details[1]));
+    bootStages[BOOT_LCD].detailCount = 2;
     bootScreenActive = true;
     drawBootScreen();
 }
 
-static void setBootStage(BootStageId id, BootStatus status, const char *detail = nullptr) {
-    bootStages[id].status = status;
-    if (detail != nullptr) {
-        strlcpy(bootStages[id].detail, detail, sizeof(bootStages[id].detail));
-    } else {
-        bootStages[id].detail[0] = '\0';
+static void setBootStageDetails(
+    BootStageId id,
+    const char *line0 = nullptr,
+    const char *line1 = nullptr,
+    const char *line2 = nullptr,
+    const char *line3 = nullptr
+) {
+    if (!bootScreenActive) return;
+    BootStage &stage = bootStages[id];
+    const char *lines[4] = {line0, line1, line2, line3};
+    memset(stage.details, 0, sizeof(stage.details));
+    stage.detailCount = 0;
+    for (uint8_t i = 0; i < 4; i++) {
+        if (lines[i] == nullptr || lines[i][0] == '\0') continue;
+        strlcpy(stage.details[stage.detailCount], lines[i], sizeof(stage.details[0]));
+        stage.detailCount++;
     }
     if (bootScreenActive) {
         drawBootScreen();
     }
 }
 
+static void setBootStage(BootStageId id, BootStatus status) {
+    BootStage &stage = bootStages[id];
+    BootStatus previous = stage.status;
+    stage.status = status;
+    stage.revealed = true;
+    if (status == BootStatus::Running && previous != BootStatus::Running) {
+        stage.startedMs = millis();
+        stage.elapsedMs = 0;
+    } else if (status != BootStatus::Pending && status != BootStatus::Running &&
+               stage.startedMs != 0) {
+        stage.elapsedMs = millis() - stage.startedMs;
+    }
+    if (status == BootStatus::Ok) {
+        memset(stage.details, 0, sizeof(stage.details));
+        stage.detailCount = 0;
+    }
+    if (bootScreenActive) {
+        drawBootScreen();
+    }
+}
+
+static void formatBootByteCount(size_t bytes, char *out, size_t outLen) {
+    if (outLen == 0) return;
+    if (bytes >= 1024 * 1024) {
+        snprintf(out, outLen, "%.2fMB", bytes / (1024.0f * 1024.0f));
+    } else if (bytes >= 1024) {
+        snprintf(out, outLen, "%.1fKB", bytes / 1024.0f);
+    } else {
+        snprintf(out, outLen, "%uB", static_cast<unsigned>(bytes));
+    }
+}
+
+struct BootMapLoadContext {
+    size_t tileCount = 0;
+    const char *range = nullptr;
+    size_t failureCount = 0;
+    size_t lastFailureTile = 0;
+    int lastHttpStatus = 0;
+    char lastError[48] = {};
+};
+
+static void updateMapBootProgress(
+    const RadarMap::LoadProgress &progress,
+    void *rawContext
+) {
+    auto *context = static_cast<BootMapLoadContext *>(rawContext);
+    if (context == nullptr) return;
+
+    char tileLine[88];
+    char geometryLine[88];
+    char targetLine[88];
+    char activityLine[88];
+    snprintf(
+        tileLine,
+        sizeof(tileLine),
+        "TILE %u/%u / RANGE %s",
+        static_cast<unsigned>(progress.viewIndex + 1),
+        static_cast<unsigned>(context->tileCount),
+        context->range != nullptr ? context->range : "?"
+    );
+    snprintf(
+        geometryLine,
+        sizeof(geometryLine),
+        "SOURCE %dX%d / ZOOM %d",
+        progress.sourceWidth,
+        progress.sourceHeight,
+        progress.zoom
+    );
+    snprintf(
+        targetLine,
+        sizeof(targetLine),
+        "TARGET %dX%d / RGB565",
+        progress.destinationWidth,
+        progress.destinationHeight
+    );
+
+    switch (progress.phase) {
+    case RadarMap::LoadPhase::Request:
+        strlcpy(activityLine, "REQUESTING STADIA STATIC MAP", sizeof(activityLine));
+        break;
+    case RadarMap::LoadPhase::Response:
+        snprintf(activityLine, sizeof(activityLine), "HTTP %d / READING HEADERS", progress.httpStatus);
+        break;
+    case RadarMap::LoadPhase::Download: {
+        char received[20];
+        char total[20];
+        formatBootByteCount(progress.receivedBytes, received, sizeof(received));
+        formatBootByteCount(progress.totalBytes, total, sizeof(total));
+        unsigned percent = progress.totalBytes > 0
+            ? static_cast<unsigned>((progress.receivedBytes * 100) / progress.totalBytes)
+            : 0;
+        snprintf(
+            activityLine,
+            sizeof(activityLine),
+            "DOWNLOAD %s/%s / %uPCT",
+            received,
+            total,
+            percent
+        );
+        break;
+    }
+    case RadarMap::LoadPhase::Decode: {
+        char pngSize[20];
+        formatBootByteCount(progress.totalBytes, pngSize, sizeof(pngSize));
+        snprintf(activityLine, sizeof(activityLine), "DECODING PNG / %s", pngSize);
+        break;
+    }
+    case RadarMap::LoadPhase::Ready: {
+        char pngSize[20];
+        formatBootByteCount(progress.totalBytes, pngSize, sizeof(pngSize));
+        snprintf(
+            activityLine,
+            sizeof(activityLine),
+            "READY / %s / DECODE %lums",
+            pngSize,
+            static_cast<unsigned long>(progress.decodeMs)
+        );
+        break;
+    }
+    case RadarMap::LoadPhase::Error:
+        context->failureCount++;
+        context->lastFailureTile = progress.viewIndex;
+        context->lastHttpStatus = progress.httpStatus;
+        strlcpy(
+            context->lastError,
+            progress.error != nullptr ? progress.error : "UNKNOWN ERROR",
+            sizeof(context->lastError)
+        );
+        snprintf(
+            activityLine,
+            sizeof(activityLine),
+            "ERROR / %s / HTTP %d",
+            context->lastError,
+            progress.httpStatus
+        );
+        break;
+    }
+
+    setBootStageDetails(
+        BOOT_MAP,
+        tileLine,
+        geometryLine,
+        targetLine,
+        activityLine
+    );
+}
+
 static void setUnavailableMapBootStatus() {
     if (config.mapProvider == MapProvider::None) {
+        setBootStageDetails(BOOT_MAP, "MAP BACKGROUND DISABLED", "PLAIN RADAR MODE SELECTED");
         setBootStage(BOOT_MAP, BootStatus::Skip);
     } else if (config.stadiaApiKey.isEmpty()) {
+        setBootStageDetails(BOOT_MAP, "STADIA MAP SELECTED", "API KEY IS EMPTY");
         setBootStage(BOOT_MAP, BootStatus::NoKey);
     } else {
+        setBootStageDetails(BOOT_MAP, "CACHE NOT AVAILABLE", "WIFI OR PSRAM IS NOT READY");
         setBootStage(BOOT_MAP, BootStatus::Skip);
     }
 }
 
 static bool preloadMapCache() {
     if (config.mapProvider == MapProvider::None) {
+        setBootStageDetails(BOOT_MAP, "MAP BACKGROUND DISABLED", "PLAIN RADAR MODE SELECTED");
         setBootStage(BOOT_MAP, BootStatus::Skip);
         return true;
     }
     if (config.stadiaApiKey.isEmpty()) {
+        setBootStageDetails(BOOT_MAP, "STADIA MAP SELECTED", "API KEY IS EMPTY");
         setBootStage(BOOT_MAP, BootStatus::NoKey);
         return true;
     }
     if (!mapRuntimeReady || WiFi.status() != WL_CONNECTED) {
+        setBootStageDetails(
+            BOOT_MAP,
+            mapRuntimeReady ? "MAP CACHE ALLOCATED" : "MAP CACHE ALLOCATION FAILED",
+            WiFi.status() == WL_CONNECTED ? "WIFI CONNECTED" : "WIFI NOT CONNECTED"
+        );
         setBootStage(BOOT_MAP, BootStatus::Fail);
         return false;
     }
 
+    setBootStage(BOOT_MAP, BootStatus::Running);
+    BootMapLoadContext progressContext;
+    progressContext.tileCount = RANGE_COUNT;
     bool allLoaded = true;
     for (size_t i = 0; i < RANGE_COUNT; i++) {
-        char progress[12];
-        snprintf(progress, sizeof(progress), "%u/%u",
-                 static_cast<unsigned>(i + 1),
-                 static_cast<unsigned>(RANGE_COUNT));
-        setBootStage(BOOT_MAP, BootStatus::Running, progress);
+        progressContext.range = config.miles ? ranges[i].miLabel : ranges[i].kmLabel;
         bool loaded = RadarMap::background.fetchStadia(
             config.lat,
             config.lon,
@@ -786,11 +1050,37 @@ static bool preloadMapCache() {
             RADAR_RADIUS,
             config.stadiaApiKey,
             config.mapBrightness,
-            i
+            i,
+            updateMapBootProgress,
+            &progressContext
         );
         allLoaded = loaded && allLoaded;
     }
-    setBootStage(BOOT_MAP, allLoaded ? BootStatus::Ok : BootStatus::Fail);
+    if (allLoaded) {
+        setBootStage(BOOT_MAP, BootStatus::Ok);
+    } else {
+        char failedLine[88];
+        char tileLine[88];
+        char reasonLine[88];
+        snprintf(
+            failedLine,
+            sizeof(failedLine),
+            "FAILED %u OF %u TILES",
+            static_cast<unsigned>(progressContext.failureCount),
+            static_cast<unsigned>(RANGE_COUNT)
+        );
+        snprintf(
+            tileLine,
+            sizeof(tileLine),
+            "LAST FAILURE TILE %u/%u / HTTP %d",
+            static_cast<unsigned>(progressContext.lastFailureTile + 1),
+            static_cast<unsigned>(RANGE_COUNT),
+            progressContext.lastHttpStatus
+        );
+        snprintf(reasonLine, sizeof(reasonLine), "REASON / %s", progressContext.lastError);
+        setBootStageDetails(BOOT_MAP, failedLine, tileLine, reasonLine);
+        setBootStage(BOOT_MAP, BootStatus::Fail);
+    }
     return allLoaded;
 }
 
@@ -971,8 +1261,8 @@ static void drawStatusScreen(const String &title, const String &body) {
 
 static void drawDisplayDiagnostics() {
     logStep("display diagnostics start");
-    Serial.printf("[display] width=%d height=%d rotation=%d\n", screen.width(), screen.height(), screen.getRotation());
-    Serial.flush();
+    RADAR_LOGD("[display] width=%d height=%d rotation=%d\n",
+               screen.width(), screen.height(), screen.getRotation());
 
     screen.fillScreen(TFT_RED);
     presentScreenOrRestart();
@@ -1303,19 +1593,81 @@ static void startPortal() {
     setStatus("SETUP PORTAL");
 }
 
+static const char *wifiStatusLabel(int status) {
+    switch (status) {
+    case WL_IDLE_STATUS: return "IDLE";
+    case WL_NO_SSID_AVAIL: return "SSID NOT FOUND";
+    case WL_SCAN_COMPLETED: return "SCAN COMPLETE";
+    case WL_CONNECTED: return "CONNECTED";
+    case WL_CONNECT_FAILED: return "AUTH FAILED";
+    case WL_CONNECTION_LOST: return "CONNECTION LOST";
+    case WL_DISCONNECTED: return "DISCONNECTED";
+    default: return "UNKNOWN";
+    }
+}
+
 static bool connectWifiOnce(uint32_t timeoutMs) {
     if (config.ssid.length() == 0) {
+        setBootStageDetails(BOOT_WIFI, "SSID IS EMPTY", "OPENING SETUP PORTAL");
         return false;
     }
+    char ssidLine[88];
+    char modeLine[88];
+    char waitLine[88];
+    char statusLine[88];
+    snprintf(ssidLine, sizeof(ssidLine), "SSID / %s", config.ssid.c_str());
+    strlcpy(modeLine, "MODE / STATION / WIFI SLEEP OFF", sizeof(modeLine));
+    snprintf(
+        waitLine,
+        sizeof(waitLine),
+        "ASSOCIATING / TIMEOUT %.1fs",
+        timeoutMs / 1000.0f
+    );
+    strlcpy(statusLine, "DHCP / WAITING FOR ADDRESS", sizeof(statusLine));
+    setBootStageDetails(BOOT_WIFI, ssidLine, modeLine, waitLine, statusLine);
+
     WiFi.mode(portalActive ? WIFI_AP_STA : WIFI_STA);
     WiFi.setSleep(false);
     WiFi.begin(config.ssid.c_str(), config.password.c_str());
     uint32_t start = millis();
+    uint32_t lastDisplayedSecond = UINT32_MAX;
     while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
         server.handleClient();
+        uint32_t elapsedMs = millis() - start;
+        uint32_t elapsedSecond = elapsedMs / 1000;
+        if (bootScreenActive && elapsedSecond != lastDisplayedSecond) {
+            lastDisplayedSecond = elapsedSecond;
+            snprintf(
+                waitLine,
+                sizeof(waitLine),
+                "WAIT %lus / %lus",
+                static_cast<unsigned long>(elapsedSecond),
+                static_cast<unsigned long>((timeoutMs + 999) / 1000)
+            );
+            snprintf(
+                statusLine,
+                sizeof(statusLine),
+                "RADIO STATUS / %s",
+                wifiStatusLabel(WiFi.status())
+            );
+            setBootStageDetails(BOOT_WIFI, ssidLine, modeLine, waitLine, statusLine);
+        }
         delay(50);
     }
     if (WiFi.status() != WL_CONNECTED) {
+        snprintf(
+            waitLine,
+            sizeof(waitLine),
+            "TIMEOUT AFTER %.1fs",
+            (millis() - start) / 1000.0f
+        );
+        snprintf(
+            statusLine,
+            sizeof(statusLine),
+            "STATUS / %s / FALLBACK TO SETUP AP",
+            wifiStatusLabel(WiFi.status())
+        );
+        setBootStageDetails(BOOT_WIFI, ssidLine, modeLine, waitLine, statusLine);
         return false;
     }
     if (!mdnsStarted && MDNS.begin("plane-radar")) {
@@ -1326,7 +1678,17 @@ static bool connectWifiOnce(uint32_t timeoutMs) {
     }
     wifiWasConnected = true;
     wifiReconnectInProgress = false;
-    Serial.printf("[wifi] connected ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    snprintf(
+        waitLine,
+        sizeof(waitLine),
+        "CONNECTED IN %.1fs / RSSI %dDBM",
+        (millis() - start) / 1000.0f,
+        WiFi.RSSI()
+    );
+    snprintf(statusLine, sizeof(statusLine), "IP / %s", WiFi.localIP().toString().c_str());
+    setBootStageDetails(BOOT_WIFI, ssidLine, modeLine, waitLine, statusLine);
+    RADAR_LOGI("[wifi] connected ip=%s rssi=%d\n",
+               WiFi.localIP().toString().c_str(), WiFi.RSSI());
     setStatus("WIFI OK " + WiFi.localIP().toString());
     return true;
 }
@@ -1340,9 +1702,9 @@ static void serviceWifiReconnect(uint32_t now) {
             forceAdsbFetch = true;
             unlockState();
             setStatus("WIFI OK " + WiFi.localIP().toString());
-            Serial.printf("[wifi] reconnected ip=%s rssi=%d\n",
-                          WiFi.localIP().toString().c_str(),
-                          WiFi.RSSI());
+            RADAR_LOGI("[wifi] reconnected ip=%s rssi=%d\n",
+                       WiFi.localIP().toString().c_str(),
+                       WiFi.RSSI());
         }
         return;
     }
@@ -1818,16 +2180,15 @@ static bool serviceRouteLookup() {
             entry->hasRoute = true;
             networkDataDirty = true;
         }
-        Serial.printf("[route] callsign=%s ok=%d origin=%s/%s destination=%s/%s\n",
-                      entry->callsign,
-                      ok ? 1 : 0,
-                      entry->originIata,
-                      entry->originCity,
-                      entry->destinationIata,
-                      entry->destinationCity);
+        RADAR_LOGD("[route] callsign=%s ok=%d origin=%s/%s destination=%s/%s\n",
+                   entry->callsign,
+                   ok ? 1 : 0,
+                   entry->originIata,
+                   entry->originCity,
+                   entry->destinationIata,
+                   entry->destinationCity);
     }
     unlockState();
-    Serial.flush();
     return ok;
 }
 
@@ -1996,6 +2357,7 @@ static void setLastFetchText(const String &text) {
 
 static bool fetchAdsb() {
     if (WiFi.status() != WL_CONNECTED) {
+        setBootStageDetails(BOOT_DATA, "ADSB REQUEST NOT STARTED", "WIFI IS NOT CONNECTED");
         return false;
     }
 
@@ -2028,15 +2390,54 @@ static bool fetchAdsb() {
     url += "/dist/";
     url += String(fetchNm, 1);
 
+    char endpointLine[88];
+    char centerLine[88];
+    char radiusLine[88];
+    char responseLine[88];
+    strlcpy(endpointLine, "ENDPOINT / OPENDATA.ADSB.FI API V3", sizeof(endpointLine));
+    snprintf(
+        centerLine,
+        sizeof(centerLine),
+        "CENTER / %.5f / %.5f",
+        centerLat,
+        centerLon
+    );
+    snprintf(
+        radiusLine,
+        sizeof(radiusLine),
+        "QUERY RADIUS / %.1fNM / DISPLAY %s",
+        fetchNm,
+        rangeLabel()
+    );
+    strlcpy(responseLine, "HTTPS REQUEST / CONNECTING", sizeof(responseLine));
+    setBootStageDetails(BOOT_DATA, endpointLine, centerLine, radiusLine, responseLine);
+
     WiFiClientSecure client;
     client.setInsecure();
     HTTPClient http;
     if (!http.begin(client, url)) {
+        strlcpy(responseLine, "HTTP BEGIN FAILED", sizeof(responseLine));
+        setBootStageDetails(BOOT_DATA, endpointLine, centerLine, radiusLine, responseLine);
         setLastFetchText("HTTP BEGIN FAIL");
         return false;
     }
     http.setTimeout(10000);
     int code = http.GET();
+    int responseLength = http.getSize();
+    if (responseLength > 0) {
+        char responseSize[20];
+        formatBootByteCount(static_cast<size_t>(responseLength), responseSize, sizeof(responseSize));
+        snprintf(
+            responseLine,
+            sizeof(responseLine),
+            "HTTP %d / RESPONSE %s",
+            code,
+            responseSize
+        );
+    } else {
+        snprintf(responseLine, sizeof(responseLine), "HTTP %d / STREAMING RESPONSE", code);
+    }
+    setBootStageDetails(BOOT_DATA, endpointLine, centerLine, radiusLine, responseLine);
     if (code != HTTP_CODE_OK) {
         setLastFetchText("HTTP " + String(code));
         http.end();
@@ -2052,6 +2453,14 @@ static bool fetchAdsb() {
     for (const char *field : fields) {
         filter["ac"][0][field] = true;
     }
+    if (responseLength > 0) {
+        char responseSize[20];
+        formatBootByteCount(static_cast<size_t>(responseLength), responseSize, sizeof(responseSize));
+        snprintf(responseLine, sizeof(responseLine), "HTTP %d / PARSING JSON / %s", code, responseSize);
+    } else {
+        snprintf(responseLine, sizeof(responseLine), "HTTP %d / PARSING JSON STREAM", code);
+    }
+    setBootStageDetails(BOOT_DATA, endpointLine, centerLine, radiusLine, responseLine);
     JsonDocument doc;
     DeserializationError err = deserializeJson(
         doc,
@@ -2060,6 +2469,8 @@ static bool fetchAdsb() {
     );
     http.end();
     if (err) {
+        snprintf(responseLine, sizeof(responseLine), "JSON ERROR / %s", err.c_str());
+        setBootStageDetails(BOOT_DATA, endpointLine, centerLine, radiusLine, responseLine);
         setLastFetchText("JSON ERROR");
         return false;
     }
@@ -2114,7 +2525,15 @@ static bool fetchAdsb() {
     networkDataDirty = true;
     unlockState();
 
-    Serial.printf("[adsb] %s\n", fetchStatus);
+    RADAR_LOGD("[adsb] %s\n", fetchStatus);
+    snprintf(
+        responseLine,
+        sizeof(responseLine),
+        "PARSED / %u AIRCRAFT / HTTP %d",
+        static_cast<unsigned>(fetchedCount),
+        code
+    );
+    setBootStageDetails(BOOT_DATA, endpointLine, centerLine, radiusLine, responseLine);
     return true;
 }
 
@@ -2670,14 +3089,14 @@ static void drawRadar() {
 
     bool logDraw = drawCounter <= 3 || drawCounter % 120 == 0;
     if (logDraw) {
-        Serial.printf("[draw] #%lu begin aircraft=%u wifi=%d w=%d h=%d free_heap=%u free_psram=%u\n",
-                      static_cast<unsigned long>(drawCounter),
-                      static_cast<unsigned>(renderCount),
-                      WiFi.status(),
-                      screen.width(),
-                      screen.height(),
-                      static_cast<unsigned>(ESP.getFreeHeap()),
-                      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+        RADAR_LOGD("[draw] #%lu begin aircraft=%u wifi=%d w=%d h=%d free_heap=%u free_psram=%u\n",
+                   static_cast<unsigned long>(drawCounter),
+                   static_cast<unsigned>(renderCount),
+                   WiFi.status(),
+                   screen.width(),
+                   screen.height(),
+                   static_cast<unsigned>(ESP.getFreeHeap()),
+                   static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
     }
     auto &g = screen;
     g.startWrite();
@@ -2835,9 +3254,9 @@ static void drawRadar() {
     lastDrawMs = completedAt;
     unlockState();
     if (logDraw) {
-        Serial.printf("[draw] #%lu end at=%lu\n",
-                      static_cast<unsigned long>(drawCounter),
-                      static_cast<unsigned long>(completedAt));
+        RADAR_LOGD("[draw] #%lu end at=%lu\n",
+                   static_cast<unsigned long>(drawCounter),
+                   static_cast<unsigned long>(completedAt));
     }
 }
 
@@ -2881,13 +3300,12 @@ static bool handleAircraftListTap(uint16_t x, uint16_t y) {
     unlockState();
 
     if (changed) {
-        Serial.printf(
+        RADAR_LOGD(
             "[track] %s hex=%s row=%u\n",
             selected ? "selected" : "cleared",
             tappedHex,
             static_cast<unsigned>(row)
         );
-        Serial.flush();
     }
     return true;
 }
@@ -2955,8 +3373,7 @@ static bool shouldDrawRadarFrame(uint32_t now) {
 }
 
 static void networkTaskMain(void *) {
-    Serial.printf("[task] network start core=%d\n", xPortGetCoreID());
-    Serial.flush();
+    RADAR_LOGD("[task] network start core=%d\n", xPortGetCoreID());
 
     while (true) {
         uint32_t now = millis();
@@ -2996,11 +3413,10 @@ static void startNetworkTask() {
         0
     );
     if (ok == pdPASS) {
-        Serial.println("[task] network task created on core 0");
+        RADAR_LOGI("[task] network task created on core 0\n");
     } else {
-        Serial.println("[task] network task create failed");
+        RADAR_LOGE("[task] network task create failed\n");
     }
-    Serial.flush();
 }
 
 static void initPalette() {
@@ -3026,7 +3442,8 @@ void setup() {
     delay(250);
     stateMutex = xSemaphoreCreateMutexStatic(&stateMutexStorage);
     if (stateMutex == nullptr) {
-        logLine("[task] state mutex create failed");
+        RADAR_LOGE("[task] state mutex create failed\n");
+        RADAR_LOGE_FLUSH();
         while (true) {
             delay(1000);
         }
@@ -3035,7 +3452,8 @@ void setup() {
     logStep("setup start");
     logStep("display begin");
     if (!screen.begin()) {
-        logStep("display failed");
+        RADAR_LOGE("[display] initialization failed\n");
+        RADAR_LOGE_FLUSH();
         while (true) {
             delay(1000);
         }
@@ -3047,47 +3465,92 @@ void setup() {
 
     logStep("palette begin");
     setBootStage(BOOT_PALETTE, BootStatus::Running);
+    setBootStageDetails(
+        BOOT_PALETTE,
+        "BUILDING RGB565 COLOR TABLE",
+        "GRID / TEXT / AIRCRAFT / RUNWAY / TRACK"
+    );
     initPalette();
     setBootStage(BOOT_PALETTE, BootStatus::Ok);
     logStep("palette end");
 
     logStep("loadConfig begin");
     setBootStage(BOOT_CONFIG, BootStatus::Running);
+    setBootStageDetails(
+        BOOT_CONFIG,
+        "NVS NAMESPACE / PLANE-RADAR",
+        "READING SAVED SETTINGS"
+    );
     loadConfig();
     selectConfiguredAirports();
     mapRuntimeReady = config.mapProvider == MapProvider::Stadia &&
                       !config.stadiaApiKey.isEmpty() &&
                       RadarMap::background.begin(PANEL_X, SCREEN_H, RANGE_COUNT);
+    char configLine[88];
+    char centerLine[88];
+    char mapLine[88];
+    char airportLine[88];
+    snprintf(
+        configLine,
+        sizeof(configLine),
+        "SAVED CONFIG / %s / RANGE %s",
+        config.configured ? "YES" : "NO",
+        rangeLabel()
+    );
+    snprintf(centerLine, sizeof(centerLine), "CENTER / %.5f / %.5f", config.lat, config.lon);
+    snprintf(
+        mapLine,
+        sizeof(mapLine),
+        "MAP / %s / BRIGHTNESS %uPCT / CACHE %s",
+        config.mapProvider == MapProvider::Stadia ? "STADIA" : "NONE",
+        static_cast<unsigned>(config.mapBrightness),
+        mapRuntimeReady ? "READY" : "OFF"
+    );
+    snprintf(
+        airportLine,
+        sizeof(airportLine),
+        "AIRPORTS / %u SELECTED / RUNWAYS %s",
+        static_cast<unsigned>(selectedAirportCount),
+        config.showRunways ? "ON" : "OFF"
+    );
+    setBootStageDetails(BOOT_CONFIG, configLine, centerLine, mapLine, airportLine);
     setBootStage(BOOT_CONFIG, BootStatus::Ok);
-    Serial.printf("[config] configured=%d ssid_len=%u lat=%.6f lon=%.6f range=%u runways=%d airport_mode=%u airport_count=%u airport_radius=%u airport_icao=%s miles=%d map=%u map_brightness=%u map_key_len=%u labels=%d%d%d%d symbols=%u\n",
-                  config.configured,
-                  static_cast<unsigned>(config.ssid.length()),
-                  config.lat,
-                  config.lon,
-                  static_cast<unsigned>(rangeIndex),
-                  config.showRunways,
-                  static_cast<unsigned>(config.airportSelectionMode),
-                  static_cast<unsigned>(config.airportCount),
-                  static_cast<unsigned>(config.airportRadiusKm),
-                  config.manualAirportIcao.c_str(),
-                  config.miles,
-                  static_cast<unsigned>(config.mapProvider),
-                  static_cast<unsigned>(config.mapBrightness),
-                  static_cast<unsigned>(config.stadiaApiKey.length()),
-                  config.showLabelCallsign,
-                  config.showLabelType,
-                  config.showLabelAltitude,
-                  config.showLabelVerticalRate,
-                  static_cast<unsigned>(config.aircraftSymbolStyle));
-    Serial.flush();
+    RADAR_LOGD("[config] configured=%d ssid_len=%u lat=%.6f lon=%.6f range=%u runways=%d airport_mode=%u airport_count=%u airport_radius=%u airport_icao=%s miles=%d map=%u map_brightness=%u map_key_len=%u labels=%d%d%d%d symbols=%u\n",
+               config.configured,
+               static_cast<unsigned>(config.ssid.length()),
+               config.lat,
+               config.lon,
+               static_cast<unsigned>(rangeIndex),
+               config.showRunways,
+               static_cast<unsigned>(config.airportSelectionMode),
+               static_cast<unsigned>(config.airportCount),
+               static_cast<unsigned>(config.airportRadiusKm),
+               config.manualAirportIcao.c_str(),
+               config.miles,
+               static_cast<unsigned>(config.mapProvider),
+               static_cast<unsigned>(config.mapBrightness),
+               static_cast<unsigned>(config.stadiaApiKey.length()),
+               config.showLabelCallsign,
+               config.showLabelType,
+               config.showLabelAltitude,
+               config.showLabelVerticalRate,
+               static_cast<unsigned>(config.aircraftSymbolStyle));
 
     if (!config.configured) {
+        setBootStageDetails(BOOT_WIFI, "NO SAVED WIFI CONFIGURATION", "SETUP PORTAL REQUIRED");
         setBootStage(BOOT_WIFI, BootStatus::Skip);
-        setUnavailableMapBootStatus();
         setBootStage(BOOT_SERVICES, BootStatus::Running);
+        setBootStageDetails(
+            BOOT_SERVICES,
+            "HTTP SERVER / PORT 80",
+            "SETUP AP / PLANERADAR-SETUP",
+            "AP ADDRESS / 192.168.4.1"
+        );
         logStep("startPortal begin");
         startPortal();
         setBootStage(BOOT_SERVICES, BootStatus::Ok);
+        setUnavailableMapBootStatus();
+        setBootStageDetails(BOOT_DATA, "ADSB REQUEST SKIPPED", "WIFI SETUP IS ACTIVE");
         setBootStage(BOOT_DATA, BootStatus::Skip);
         logStep("startPortal end");
     } else {
@@ -3095,16 +3558,32 @@ void setup() {
         logStep("connectWifi begin");
         if (!connectWifiOnce(WIFI_CONNECT_ATTEMPT_MS)) {
             setBootStage(BOOT_WIFI, BootStatus::Fail);
-            setUnavailableMapBootStatus();
             setStatus("WIFI RETRY");
             setBootStage(BOOT_SERVICES, BootStatus::Running);
+            setBootStageDetails(
+                BOOT_SERVICES,
+                "HTTP SERVER / PORT 80",
+                "FALLBACK AP / PLANERADAR-SETUP",
+                "AP ADDRESS / 192.168.4.1"
+            );
             logStep("connect failed, startPortal begin");
             startPortal();
             setBootStage(BOOT_SERVICES, BootStatus::Ok);
+            setUnavailableMapBootStatus();
+            setBootStageDetails(BOOT_DATA, "ADSB REQUEST SKIPPED", "WIFI CONNECTION FAILED");
             setBootStage(BOOT_DATA, BootStatus::Skip);
             logStep("connect failed, startPortal end");
         } else {
             setBootStage(BOOT_WIFI, BootStatus::Ok);
+            setBootStage(BOOT_SERVICES, BootStatus::Running);
+            char serviceIpLine[88];
+            snprintf(serviceIpLine, sizeof(serviceIpLine), "HTTP SERVER / %s:80", WiFi.localIP().toString().c_str());
+            setBootStageDetails(
+                BOOT_SERVICES,
+                serviceIpLine,
+                "MDNS / PLANE-RADAR.LOCAL",
+                "BACKGROUND NETWORK TASK / CORE 0"
+            );
             setBootStage(BOOT_SERVICES, BootStatus::Ok);
             preloadMapCache();
             setBootStage(BOOT_DATA, BootStatus::Running);
@@ -3118,6 +3597,13 @@ void setup() {
         }
     }
     setBootStage(BOOT_INTERFACE, BootStatus::Running);
+    setBootStageDetails(
+        BOOT_INTERFACE,
+        "RADAR VIEW / 520X480",
+        "AIRCRAFT LIST / 280X480",
+        "TOUCH / GT911 / FRAME LOOP UNLOCKED",
+        "PREPARING FIRST FRAME"
+    );
     setBootStage(BOOT_INTERFACE, BootStatus::Ok);
 
     bool setupMode = portalActive;

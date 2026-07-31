@@ -1,4 +1,5 @@
 #include "panel_display.h"
+#include "app_log.h"
 
 #include <algorithm>
 #include <ctype.h>
@@ -40,6 +41,11 @@ static constexpr int FONT_W = 5;
 static constexpr int FONT_H = 7;
 static constexpr int FONT_ADVANCE = 6;
 static constexpr int LINE_ADVANCE = 9;
+static constexpr int MEDIUM_FONT_W = 8;
+static constexpr int MEDIUM_FONT_H = 11;
+static constexpr int MEDIUM_FONT_ADVANCE = 10;
+static constexpr uint8_t MEDIUM_COLUMN_WIDTHS[FONT_W] = {2, 1, 2, 1, 2};
+static constexpr uint8_t MEDIUM_ROW_HEIGHTS[FONT_H] = {2, 1, 2, 1, 2, 1, 2};
 
 static const uint8_t *glyphFor(char c) {
     if (c == 'v') {
@@ -94,42 +100,43 @@ static const uint8_t *glyphFor(char c) {
     case '^': { static const uint8_t g[7] = {0x04, 0x0E, 0x15, 0x04, 0x04, 0x04, 0x04}; return g; }
     case '+': { static const uint8_t g[7] = {0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00}; return g; }
     case '=': { static const uint8_t g[7] = {0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00}; return g; }
+    case '>': { static const uint8_t g[7] = {0x10, 0x08, 0x04, 0x02, 0x04, 0x08, 0x10}; return g; }
     case '\'': { static const uint8_t g[7] = {0x0C, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00}; return g; }
     case '?': default: { static const uint8_t g[7] = {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04}; return g; }
     }
 }
 
 bool Canvas::begin() {
-    Serial.println("[display] ESP32_Display_Panel backend begin");
+    RADAR_LOGD("[display] ESP32_Display_Panel backend begin\n");
     board = new Board();
     if (board == nullptr) {
-        Serial.println("[display] Board allocation failed");
+        RADAR_LOGE("[display] Board allocation failed\n");
         return false;
     }
 
-    Serial.println("[display] board.init begin");
+    RADAR_LOGD("[display] board.init begin\n");
     if (!board->init()) {
-        Serial.println("[display] board.init failed");
+        RADAR_LOGE("[display] board.init failed\n");
         return false;
     }
 
     lcd = board->getLCD();
     if (lcd == nullptr) {
-        Serial.println("[display] LCD is null after init");
+        RADAR_LOGE("[display] LCD is null after init\n");
         return false;
     }
     lcd->configFrameBufferNumber(2);
 
-    Serial.println("[display] board.begin begin");
+    RADAR_LOGD("[display] board.begin begin\n");
     if (!board->begin()) {
-        Serial.println("[display] board.begin failed");
+        RADAR_LOGE("[display] board.begin failed\n");
         return false;
     }
 
     lcd = board->getLCD();
     touch = board->getTouch();
     if (lcd == nullptr) {
-        Serial.println("[display] LCD is null after begin");
+        RADAR_LOGE("[display] LCD is null after begin\n");
         return false;
     }
 
@@ -144,44 +151,42 @@ bool Canvas::begin() {
         std::fill(_driverFb[1], _driverFb[1] + pixels, TFT_BLACK);
         refreshFinishedSemaphore = xSemaphoreCreateBinaryStatic(&refreshFinishedSemaphoreStorage);
         if (refreshFinishedSemaphore == nullptr || !lcd->attachRefreshFinishCallback(onRefreshFinished)) {
-            Serial.println("[display] refresh synchronization setup failed");
+            RADAR_LOGE("[display] refresh synchronization setup failed\n");
             return false;
         }
         drainRefreshSemaphore();
         if (!lcd->switchFrameBufferTo(_driverFb[0])) {
-            Serial.println("[display] initial framebuffer switch failed");
+            RADAR_LOGE("[display] initial framebuffer switch failed\n");
             return false;
         }
         drainRefreshSemaphore();
         if (xSemaphoreTake(refreshFinishedSemaphore, pdMS_TO_TICKS(150)) != pdTRUE) {
-            Serial.println("[display] initial framebuffer synchronization failed");
+            RADAR_LOGE("[display] initial framebuffer synchronization failed\n");
             return false;
         }
     } else {
-        Serial.println("[display] driver framebuffers unavailable, falling back to copy framebuffer");
+        RADAR_LOGI("[display] driver framebuffers unavailable, using copy framebuffer\n");
         size_t bytes = pixels * sizeof(uint16_t);
         _fb = static_cast<uint16_t *>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         if (_fb == nullptr) {
-            Serial.println("[display] PSRAM framebuffer allocation failed, trying default heap");
+            RADAR_LOGI("[display] PSRAM framebuffer unavailable, trying internal heap\n");
             _fb = static_cast<uint16_t *>(malloc(bytes));
         }
         if (_fb == nullptr) {
-            Serial.println("[display] framebuffer allocation failed");
+            RADAR_LOGE("[display] framebuffer allocation failed\n");
             return false;
         }
     }
 
-    Serial.printf("[display] ready lcd=%dx%d color_bits=%d touch=%d fb=%p fb0=%p fb1=%p double=%d free_heap=%u free_psram=%u\n",
-                  lcd->getFrameWidth(),
-                  lcd->getFrameHeight(),
-                  lcd->getFrameColorBits(),
-                  touch != nullptr ? 1 : 0,
-                  _fb,
-                  _driverFb[0],
-                  _driverFb[1],
-                  _usingDriverFrameBuffers ? 1 : 0,
-                  static_cast<unsigned>(ESP.getFreeHeap()),
-                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    RADAR_LOGI("[display] ready lcd=%dx%d touch=%d double=%d free_heap=%u free_psram=%u\n",
+               lcd->getFrameWidth(),
+               lcd->getFrameHeight(),
+               touch != nullptr ? 1 : 0,
+               _usingDriverFrameBuffers ? 1 : 0,
+               static_cast<unsigned>(ESP.getFreeHeap()),
+               static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    RADAR_LOGD("[display] color_bits=%d fb=%p fb0=%p fb1=%p\n",
+               lcd->getFrameColorBits(), _fb, _driverFb[0], _driverFb[1]);
     if (_usingDriverFrameBuffers) {
         return true;
     }
@@ -191,13 +196,13 @@ bool Canvas::begin() {
 
 bool Canvas::present() {
     if (lcd == nullptr || _fb == nullptr) {
-        Serial.println("[display] present skipped: lcd/fb null");
+        RADAR_LOGE("[display] present skipped: lcd/fb null\n");
         return false;
     }
     uint32_t start = millis();
     if (_usingDriverFrameBuffers) {
         if (refreshFinishedSemaphore == nullptr) {
-            Serial.println("[display] refresh semaphore unavailable");
+            RADAR_LOGE("[display] refresh semaphore unavailable\n");
             return false;
         }
 
@@ -205,13 +210,13 @@ bool Canvas::present() {
         for (uint8_t attempt = 0; attempt < 2 && !synchronized; attempt++) {
             drainRefreshSemaphore();
             if (!lcd->switchFrameBufferTo(_fb)) {
-                Serial.printf("[display] framebuffer switch failed attempt=%u\n", attempt + 1);
+                RADAR_LOGE("[display] framebuffer switch failed attempt=%u\n", attempt + 1);
                 continue;
             }
             drainRefreshSemaphore();
             synchronized = xSemaphoreTake(refreshFinishedSemaphore, pdMS_TO_TICKS(150)) == pdTRUE;
             if (!synchronized) {
-                Serial.printf("[display] refresh wait timeout attempt=%u\n", attempt + 1);
+                RADAR_LOGE("[display] refresh wait timeout attempt=%u\n", attempt + 1);
             }
         }
         if (!synchronized) {
@@ -221,16 +226,16 @@ bool Canvas::present() {
         _fb = _driverFb[_drawFbIndex];
     } else {
         if (!lcd->drawBitmap(0, 0, WIDTH, HEIGHT, reinterpret_cast<const uint8_t *>(_fb), -1)) {
-            Serial.println("[display] drawBitmap failed");
+            RADAR_LOGE("[display] drawBitmap failed\n");
             return false;
         }
     }
     presentCounter++;
     if (presentCounter <= 3 || presentCounter % 120 == 0) {
-        Serial.printf("[display] present #%lu dt=%lu double=%d\n",
-                      static_cast<unsigned long>(presentCounter),
-                      static_cast<unsigned long>(millis() - start),
-                      _usingDriverFrameBuffers ? 1 : 0);
+        RADAR_LOGD("[display] present #%lu dt=%lu double=%d\n",
+                   static_cast<unsigned long>(presentCounter),
+                   static_cast<unsigned long>(millis() - start),
+                   _usingDriverFrameBuffers ? 1 : 0);
     }
     return true;
 }
@@ -487,6 +492,16 @@ int Canvas::textWidth(const String &text) const {
     return textWidth(text.c_str());
 }
 
+int Canvas::mediumTextWidth(const char *text) const {
+    if (text == nullptr || text[0] == '\0') return 0;
+    return static_cast<int>(strlen(text)) * MEDIUM_FONT_ADVANCE -
+        (MEDIUM_FONT_ADVANCE - MEDIUM_FONT_W);
+}
+
+int Canvas::mediumTextWidth(const String &text) const {
+    return mediumTextWidth(text.c_str());
+}
+
 void Canvas::drawChar(char ch, int x, int y) {
     const uint8_t *rows = glyphFor(ch);
     int s = _textSize;
@@ -533,6 +548,53 @@ void Canvas::drawString(const String &text, int x, int y) {
         return;
     }
     drawString(text.c_str(), x, y);
+}
+
+void Canvas::drawMediumChar(char ch, int x, int y) {
+    const uint8_t *rows = glyphFor(ch);
+    fillRect(x, y, MEDIUM_FONT_W, MEDIUM_FONT_H, _textBg);
+
+    int destinationY = y;
+    for (int sourceY = 0; sourceY < FONT_H; sourceY++) {
+        int destinationX = x;
+        for (int sourceX = 0; sourceX < FONT_W; sourceX++) {
+            if (rows[sourceY] & (1 << (FONT_W - 1 - sourceX))) {
+                fillRect(
+                    destinationX,
+                    destinationY,
+                    MEDIUM_COLUMN_WIDTHS[sourceX],
+                    MEDIUM_ROW_HEIGHTS[sourceY],
+                    _textFg
+                );
+            }
+            destinationX += MEDIUM_COLUMN_WIDTHS[sourceX];
+        }
+        destinationY += MEDIUM_ROW_HEIGHTS[sourceY];
+    }
+}
+
+void Canvas::drawMediumString(const char *text, int x, int y) {
+    if (text == nullptr) return;
+    int width = mediumTextWidth(text);
+    int startX = x;
+    int startY = y;
+    if (_datum == textdatum_t::top_right) {
+        startX = x - width;
+    } else if (_datum == textdatum_t::middle_center) {
+        startX = x - width / 2;
+        startY = y - MEDIUM_FONT_H / 2;
+    }
+    for (size_t i = 0; text[i] != '\0'; i++) {
+        drawMediumChar(
+            text[i],
+            startX + static_cast<int>(i) * MEDIUM_FONT_ADVANCE,
+            startY
+        );
+    }
+}
+
+void Canvas::drawMediumString(const String &text, int x, int y) {
+    drawMediumString(text.c_str(), x, y);
 }
 
 } // namespace PanelDisplay

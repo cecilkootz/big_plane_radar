@@ -6,6 +6,32 @@
 
 namespace RadarMap {
 
+enum class LoadPhase : uint8_t {
+    Request,
+    Response,
+    Download,
+    Decode,
+    Ready,
+    Error,
+};
+
+struct LoadProgress {
+    LoadPhase phase = LoadPhase::Request;
+    size_t viewIndex = 0;
+    int zoom = 0;
+    int sourceWidth = 0;
+    int sourceHeight = 0;
+    int destinationWidth = 0;
+    int destinationHeight = 0;
+    int httpStatus = 0;
+    size_t receivedBytes = 0;
+    size_t totalBytes = 0;
+    uint32_t decodeMs = 0;
+    const char *error = nullptr;
+};
+
+using LoadProgressCallback = void (*)(const LoadProgress &progress, void *context);
+
 class Background {
 public:
     bool begin(int width, int height, size_t viewCount);
@@ -16,7 +42,9 @@ public:
         int radarRadius,
         const String &apiKey,
         uint8_t brightnessPercent,
-        size_t viewIndex
+        size_t viewIndex,
+        LoadProgressCallback progressCallback = nullptr,
+        void *progressContext = nullptr
     );
     bool draw(PanelDisplay::Canvas &canvas, size_t viewIndex);
     bool isReady(size_t viewIndex);

@@ -52,8 +52,12 @@ public:
     void setTextDatum(textdatum_t datum);
     int textWidth(const char *text) const;
     int textWidth(const String &text) const;
+    int mediumTextWidth(const char *text) const;
+    int mediumTextWidth(const String &text) const;
     void drawString(const String &text, int x, int y);
     void drawString(const char *text, int x, int y);
+    void drawMediumString(const String &text, int x, int y);
+    void drawMediumString(const char *text, int x, int y);
 
     int width() const { return WIDTH; }
     int height() const { return HEIGHT; }
@@ -72,6 +76,7 @@ private:
     textdatum_t _datum = textdatum_t::top_left;
 
     void drawChar(char ch, int x, int y);
+    void drawMediumChar(char ch, int x, int y);
 };
 
 extern Canvas screen;

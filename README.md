@@ -90,7 +90,9 @@ enter coordinates manually. You can change them later from
 Wi-Fi.
 
 The first map-enabled boot downloads four map images. Keep the device powered
-and wait for `MAP CACHE ... 4/4`; the radar opens automatically afterwards.
+and wait for `TILE CACHE` to finish tile `4/4`; the radar opens automatically
+afterwards. The boot log shows each tile's range, zoom, dimensions, PNG size,
+download progress, and decode time.
 
 ### Everyday controls
 
@@ -181,7 +183,7 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
   its track, and long press to start the setup portal;
 - boot setup window: hold the screen during startup to force the setup portal;
 - screenshot endpoint: `/screenshot` and `/screenshot.bmp`;
-- conservative RGB LCD settings for this panel: `14 MHz` PCLK and `800 * 10`
+- conservative RGB LCD settings for this panel: `12 MHz` PCLK and `800 * 10`
   RGB bounce buffer.
 
 ## Symbol Legend
@@ -270,6 +272,18 @@ arduino-cli core install esp32:esp32
 bash build_arduino_cli.sh
 ```
 
+The default `LOG_LEVEL=info` keeps only errors and important one-time events in
+Serial. Use a debug build when diagnosing boot, networking, map loading, or frame
+timing:
+
+```sh
+LOG_LEVEL=debug bash build_arduino_cli.sh
+```
+
+Supported levels are `off`, `error`, `info`, and `debug`. Disabled application
+logs are removed at compile time; the build script also reduces the ESP32 core
+log level accordingly.
+
 By default, no Wi-Fi credentials are compiled into the firmware. The default
 radar center is London:
 
@@ -311,8 +325,8 @@ fails, the radar continues on its normal plain background.
 When Stadia is enabled, boot downloads one image for each of the four range
 presets. The images remain in PSRAM until restart. They are refreshed only on
 the next boot, including after changing the radar coordinates in setup. The
-boot screen reports map progress as `1/4` through `4/4`; it shows `SKIP` when
-maps are disabled and `NO KEY` when Stadia is selected without a key.
+boot log reports tile progress as `1/4` through `4/4`; it shows `SKIP` when maps
+are disabled and `NO KEY` when Stadia is selected without a key.
 
 ### Upload over USB
 
