@@ -183,7 +183,7 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
   its track, and long press to start the setup portal;
 - boot setup window: hold the screen during startup to force the setup portal;
 - screenshot endpoint: `/screenshot` and `/screenshot.bmp`;
-- conservative RGB LCD settings for this panel: `12 MHz` PCLK and `800 * 10`
+- conservative RGB LCD settings for this panel: `13 MHz` PCLK and `800 * 10`
   RGB bounce buffer.
 
 ## Symbol Legend

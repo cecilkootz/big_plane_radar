@@ -185,7 +185,7 @@ https://makerworld.com/ru/models/3034679-stand-for-esp32-s3-touch-lcd-7-for-plan
 - boot setup window: удержание экрана во время запуска принудительно открывает
   setup portal;
 - endpoint для скриншота: `/screenshot` и `/screenshot.bmp`;
-- консервативные настройки RGB LCD для этой панели: PCLK `12 MHz` и RGB bounce
+- консервативные настройки RGB LCD для этой панели: PCLK `13 MHz` и RGB bounce
   buffer `800 * 10`.
 
 ## Легенда символов

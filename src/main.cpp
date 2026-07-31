@@ -2341,7 +2341,13 @@ static void formatVerticalRate(float fpm, char *out, size_t outLen) {
         strlcpy(out, "LVL", outLen);
         return;
     }
-    snprintf(out, outLen, "%c%d", fpm > 0 ? '^' : 'v', static_cast<int>(lroundf(fabsf(fpm))));
+    snprintf(
+        out,
+        outLen,
+        "%c%d",
+        fpm > 0 ? '^' : PanelDisplay::GLYPH_ARROW_DOWN,
+        static_cast<int>(lroundf(fabsf(fpm)))
+    );
 }
 
 static bool isGroundAircraft(const JsonObject &plane) {

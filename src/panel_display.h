@@ -18,6 +18,7 @@ namespace PanelDisplay {
 
 static constexpr int WIDTH = 800;
 static constexpr int HEIGHT = 480;
+static constexpr char GLYPH_ARROW_DOWN = '\x1f';
 
 class Canvas {
 public:

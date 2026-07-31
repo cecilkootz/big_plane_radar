@@ -48,7 +48,7 @@ static constexpr uint8_t MEDIUM_COLUMN_WIDTHS[FONT_W] = {2, 1, 2, 1, 2};
 static constexpr uint8_t MEDIUM_ROW_HEIGHTS[FONT_H] = {2, 1, 2, 1, 2, 1, 2};
 
 static const uint8_t *glyphFor(char c) {
-    if (c == 'v') {
+    if (c == GLYPH_ARROW_DOWN) {
         static const uint8_t g[7] = {0x04, 0x04, 0x04, 0x04, 0x15, 0x0E, 0x04};
         return g;
     }
