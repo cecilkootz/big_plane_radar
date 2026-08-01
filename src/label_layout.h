@@ -84,8 +84,10 @@ private:
         float anchorY = 0;
         float width = 0;
         float height = 0;
+        uint32_t orbitLockUntilMs = 0;
         uint8_t conflictFrames = 0;
         uint8_t cleanFrames = 0;
+        int8_t orbitDirection = 0;
         bool occupied = false;
         bool visible = true;
     };
@@ -102,8 +104,6 @@ private:
         float forceY = 0;
         float aircraftForceX = 0;
         float aircraftForceY = 0;
-        float labelForceX = 0;
-        float labelForceY = 0;
         float forwardX = 0;
         float forwardY = -1;
         float rightX = 1;
@@ -114,6 +114,7 @@ private:
     State states_[kMaxLabels];
     WorkItem work_[kMaxLabels];
     size_t orbitCursor_ = 0;
+    size_t collisionSearchCursor_ = 0;
 };
 
 }  // namespace RadarLabels

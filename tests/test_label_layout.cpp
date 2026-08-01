@@ -268,6 +268,49 @@ static void testOrbitSearchKeepsBlockedLabelClose() {
     CHECK(output.visible);
 }
 
+static void testCrossingLabelsKeepOrbitDirection() {
+    LabelLayout layout;
+    layout.reset();
+    LabelLayoutInput inputs[2] = {
+        makeInput(10, 170, 240),
+        makeInput(20, 330, 240),
+    };
+    inputs[0].courseValid = false;
+    inputs[1].courseValid = false;
+    LabelLayoutOutput outputs[2];
+    layout.solve(
+        inputs, 2, nullptr, 0, nullptr, 0, kBounds,
+        1000, 1, 0.033f, outputs
+    );
+
+    int orbitSide = 0;
+    size_t sideChanges = 0;
+    for (uint32_t frame = 1; frame <= 80; frame++) {
+        inputs[0].anchorX += 0.75f;
+        inputs[1].anchorX -= 0.75f;
+        layout.solve(
+            inputs, 2, nullptr, 0, nullptr, 0, kBounds,
+            1000 + frame * 33, 1, 0.033f, outputs
+        );
+
+        float relativeY = outputs[1].y + inputs[1].height * 0.5f -
+            inputs[1].anchorY;
+        if (fabsf(relativeY) > 1.0f) {
+            int side = relativeY > 0.0f ? 1 : -1;
+            if (orbitSide != 0 && side != orbitSide) sideChanges++;
+            orbitSide = side;
+        }
+    }
+
+    float winnerRelativeY = outputs[0].y + inputs[0].height * 0.5f -
+        inputs[0].anchorY;
+    float yieldingRelativeY = outputs[1].y + inputs[1].height * 0.5f -
+        inputs[1].anchorY;
+    CHECK(sideChanges == 0);
+    CHECK(fabsf(winnerRelativeY) < 2.0f);
+    CHECK(fabsf(yieldingRelativeY) > 4.0f);
+}
+
 static void runDenseScene(size_t count) {
     LabelLayout layout;
     layout.reset();
@@ -322,6 +365,7 @@ int main() {
     testStaticObstacleAndLayoutRevision();
     testAnchorMovementAndTemporaryDisappearance();
     testOrbitSearchKeepsBlockedLabelClose();
+    testCrossingLabelsKeepOrbitDirection();
     testDenseSceneAndMandatoryLabels();
     testNoHeapAllocationDuringSolve();
     puts("label_layout tests passed");
