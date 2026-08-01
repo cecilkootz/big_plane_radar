@@ -8,8 +8,8 @@ namespace {
 
 static constexpr uint32_t kStateTtlMs = 60000;
 static constexpr float kAnchorJumpPx = 80.0f;
-static constexpr float kMinimumSymbolGapPx = 6.0f;
-static constexpr float kPreferredSymbolGapPx = 12.0f;
+static constexpr float kMinimumSymbolGapPx = 2.0f;
+static constexpr float kPreferredSymbolGapPx = 4.0f;
 static constexpr float kNormalMaxGapPx = 64.0f;
 static constexpr float kPriorityMaxGapPx = 96.0f;
 static constexpr float kMaxMovementPxPerSecond = 64.0f;
@@ -508,17 +508,26 @@ void LabelLayout::solve(
             float centerY = work.y + input.height * 0.5f;
             float fromAnchorX = centerX - input.anchorX;
             float fromAnchorY = centerY - input.anchorY;
-            float centerDistance = sqrtf(
-                fromAnchorX * fromAnchorX + fromAnchorY * fromAnchorY
-            );
-            if (centerDistance > 0.001f) {
-                float unitX = fromAnchorX / centerDistance;
-                float unitY = fromAnchorY / centerDistance;
-                float extent = fabsf(unitX) * input.width * 0.5f +
-                    fabsf(unitY) * input.height * 0.5f;
-                float targetDistance = input.symbolRadius +
-                    kPreferredSymbolGapPx + extent;
-                float spring = (targetDistance - centerDistance) * 0.11f;
+            float nearestX = clampFloat(input.anchorX, work.x, work.x + input.width);
+            float nearestY = clampFloat(input.anchorY, work.y, work.y + input.height);
+            float edgeX = nearestX - input.anchorX;
+            float edgeY = nearestY - input.anchorY;
+            float edgeDistance = sqrtf(edgeX * edgeX + edgeY * edgeY);
+            float directionX = edgeX;
+            float directionY = edgeY;
+            float directionDistance = edgeDistance;
+            if (directionDistance < 0.001f) {
+                directionX = fromAnchorX;
+                directionY = fromAnchorY;
+                directionDistance = sqrtf(
+                    directionX * directionX + directionY * directionY
+                );
+            }
+            if (directionDistance > 0.001f) {
+                float unitX = directionX / directionDistance;
+                float unitY = directionY / directionDistance;
+                float targetDistance = input.symbolRadius + kPreferredSymbolGapPx;
+                float spring = (targetDistance - edgeDistance) * 0.28f;
                 work.forceX += unitX * spring;
                 work.forceY += unitY * spring;
             }

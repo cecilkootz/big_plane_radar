@@ -73,6 +73,16 @@ static void checkBounds(const LabelLayoutInput &input, const LabelLayoutOutput &
     CHECK(output.y + input.height <= kBounds.bottom + 0.001f);
 }
 
+static float labelGapFromSymbol(
+    const LabelLayoutInput &input,
+    const LabelLayoutOutput &output
+) {
+    float nearestX = fmaxf(output.x, fminf(input.anchorX, output.x + input.width));
+    float nearestY = fmaxf(output.y, fminf(input.anchorY, output.y + input.height));
+    return hypotf(nearestX - input.anchorX, nearestY - input.anchorY) -
+        input.symbolRadius;
+}
+
 static bool insideForwardCone(
     const LabelLayoutInput &input,
     const LabelLayoutOutput &output
@@ -103,6 +113,8 @@ static void testSingleAircraftAndCourseCone() {
     CHECK(output.visible);
     checkBounds(input, output);
     CHECK(!insideForwardCone(input, output));
+    CHECK(labelGapFromSymbol(input, output) >= 1.9f);
+    CHECK(labelGapFromSymbol(input, output) <= 4.1f);
 }
 
 static void testBoundsAndResize() {
