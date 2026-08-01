@@ -14,6 +14,7 @@
 #include "aircraft_icons.h"
 #include "app_log.h"
 #include "airport_catalog.h"
+#include "label_layout.h"
 #include "map_background.h"
 #include "panel_display.h"
 
@@ -153,6 +154,21 @@ struct Aircraft {
     uint32_t positionMs = 0;
     bool inside = false;
     bool hasFlight = false;
+    bool hasTrack = false;
+};
+
+struct RadarLabelLine {
+    char text[32] = {};
+    uint16_t color = 0;
+    int width = 0;
+};
+
+struct RadarLabelRender {
+    size_t lineCount = 0;
+    int width = 0;
+    int height = 0;
+    bool mustShow = false;
+    RadarLabelLine lines[3];
 };
 
 struct SelectedAirport {
@@ -205,6 +221,11 @@ static Aircraft renderAircraft[MAX_AIRCRAFT];
 static RouteCacheEntry renderRouteCache[MAX_ROUTE_CACHE];
 static AircraftTrack *aircraftTracks = nullptr;
 static TrackPoint renderTrack[TRACK_POINTS_PER_AIRCRAFT];
+static RadarLabels::LabelLayout aircraftLabelLayout;
+static RadarLabels::LabelLayoutInput labelLayoutInputs[MAX_AIRCRAFT];
+static RadarLabels::LabelLayoutOutput labelLayoutOutputs[MAX_AIRCRAFT];
+static RadarLabels::AircraftObstacle labelAircraftObstacles[MAX_AIRCRAFT];
+static RadarLabelRender radarLabels[MAX_AIRCRAFT];
 static char selectedAircraftHex[7] = {};
 static char visibleListAircraftHex[PANEL_MAX_ROWS][7] = {};
 static size_t visibleListRowCount = 0;
@@ -2501,6 +2522,9 @@ static bool fetchAdsb() {
             dst.positionMs = fetchNow;
             dst.noseDeg = pickHeading(plane, false);
             dst.trackDeg = pickHeading(plane, true);
+            float rawTrack = 0;
+            dst.hasTrack = readJsonFloat(plane, "track", rawTrack) ||
+                readJsonFloat(plane, "dir", rawTrack);
             dst.gsKnots = pickSpeed(plane);
             dst.verticalRateFpm = pickVerticalRate(plane);
             copyJsonStringTrimmed(plane, "hex", dst.hex, sizeof(dst.hex));
@@ -2893,6 +2917,128 @@ static void drawAircraftSymbol(Gfx &g, const Aircraft &item, int cx, int cy) {
     drawPlane(g, cx, cy, item.noseDeg, planeSizeClass(item));
 }
 
+static uint32_t aircraftLabelId(const Aircraft &item) {
+    uint32_t hash = 2166136261U;
+    const char *value = item.hex[0] != '\0' ? item.hex : item.callsign;
+    for (size_t i = 0; value[i] != '\0'; i++) {
+        hash ^= static_cast<uint8_t>(value[i]);
+        hash *= 16777619U;
+    }
+    return hash == 0 ? 1 : hash;
+}
+
+static float aircraftSymbolRadius(const Aircraft &item) {
+    if (config.aircraftSymbolStyle == AircraftSymbolStyle::DetailedIcons) {
+        return static_cast<float>(AircraftIcons::halfExtent(
+            isRotorcraft(item),
+            planeSizeClass(item)
+        ));
+    }
+    if (isRotorcraft(item)) return 8.0f;
+    uint8_t sizeClass = planeSizeClass(item);
+    if (sizeClass == 0) return 9.0f;
+    if (sizeClass >= 2) return 15.0f;
+    return 12.0f;
+}
+
+static bool aircraftMapPoint(
+    const Aircraft &item,
+    bool mapVisible,
+    int &x,
+    int &y
+) {
+    x = item.screenX;
+    y = item.screenY;
+    if (item.inside) return true;
+
+    if (mapVisible) {
+        projectToMapEdge(x, y, x, y);
+        return true;
+    }
+
+    float dxKm = 0;
+    float dyKm = 0;
+    float distKm = 0;
+    offsetKm(item.renderLat, item.renderLon, dxKm, dyKm, distKm);
+    if (distKm < 0.01f) return false;
+    float angle = atan2f(dxKm, dyKm);
+    x = RADAR_CX + lroundf(sinf(angle) * (RADAR_RADIUS + 12));
+    y = RADAR_CY - lroundf(cosf(angle) * (RADAR_RADIUS + 12));
+    return true;
+}
+
+template <typename Gfx>
+static size_t prepareRadarLabels(
+    Gfx &g,
+    const Aircraft *items,
+    size_t itemCount,
+    const char *selectedHex
+) {
+    size_t labelCount = 0;
+    g.setTextSize(1);
+    for (size_t aircraftIndex = 0;
+         aircraftIndex < itemCount && labelCount < MAX_AIRCRAFT;
+         aircraftIndex++) {
+        const Aircraft &item = items[aircraftIndex];
+        if (!item.inside || item.screenX < 0 || item.screenX >= PANEL_X ||
+            item.screenY < 0 || item.screenY >= SCREEN_H) {
+            continue;
+        }
+
+        RadarLabelRender &label = radarLabels[labelCount];
+        label = RadarLabelRender();
+        label.mustShow = squawkAlertLabel(item.squawk) != nullptr ||
+            (selectedHex != nullptr && selectedHex[0] != '\0' &&
+             strcmp(item.hex, selectedHex) == 0);
+
+        auto appendLine = [&](const char *text, uint16_t color) {
+            if (text == nullptr || text[0] == '\0' || label.lineCount >= 3) return;
+            RadarLabelLine &line = label.lines[label.lineCount++];
+            strlcpy(line.text, text, sizeof(line.text));
+            line.color = color;
+            line.width = g.textWidth(line.text);
+            label.width = std::max(label.width, line.width);
+        };
+
+        const char *callsign = item.callsign[0] ? item.callsign : "????";
+        if (config.showLabelCallsign) appendLine(callsign, colorText);
+        if (config.showLabelType) appendLine(item.type, colorDim);
+
+        char altitudeLine[32] = {};
+        if (config.showLabelAltitude && item.alt[0] != '\0') {
+            strlcpy(altitudeLine, item.alt, sizeof(altitudeLine));
+        }
+        if (config.showLabelVerticalRate && item.vsi[0] != '\0') {
+            if (altitudeLine[0] != '\0') {
+                strlcat(altitudeLine, " ", sizeof(altitudeLine));
+            }
+            strlcat(altitudeLine, item.vsi, sizeof(altitudeLine));
+        }
+        appendLine(altitudeLine, colorWarn);
+        if (label.lineCount == 0) continue;
+
+        label.width += AIRCRAFT_LABEL_PADDING * 2;
+        label.height = AIRCRAFT_LABEL_LINE_HEIGHT +
+            static_cast<int>(label.lineCount - 1) * AIRCRAFT_LABEL_LINE_ADVANCE +
+            AIRCRAFT_LABEL_PADDING * 2;
+
+        RadarLabels::LabelLayoutInput &input = labelLayoutInputs[labelCount];
+        input = RadarLabels::LabelLayoutInput();
+        input.id = aircraftLabelId(item);
+        input.anchorX = static_cast<float>(item.screenX);
+        input.anchorY = static_cast<float>(item.screenY);
+        input.width = static_cast<float>(label.width);
+        input.height = static_cast<float>(label.height);
+        input.symbolRadius = aircraftSymbolRadius(item);
+        input.courseDeg = item.trackDeg;
+        input.distanceKm = item.distanceKm;
+        input.courseValid = item.hasTrack;
+        input.mustShow = label.mustShow;
+        labelCount++;
+    }
+    return labelCount;
+}
+
 template <typename Gfx>
 static void drawRunways(Gfx &g) {
     if (!config.showRunways) return;
@@ -3150,97 +3296,114 @@ static void drawRadar() {
 
     drawRunways(g);
 
+    size_t aircraftObstacleCount = 0;
     for (size_t i = 0; i < renderCount; i++) {
-        int x = renderAircraft[i].screenX;
-        int y = renderAircraft[i].screenY;
+        int x = 0;
+        int y = 0;
+        if (!aircraftMapPoint(renderAircraft[i], mapVisible, x, y)) continue;
+
+        RadarLabels::AircraftObstacle &obstacle =
+            labelAircraftObstacles[aircraftObstacleCount++];
+        obstacle.x = static_cast<float>(x);
+        obstacle.y = static_cast<float>(y);
+        obstacle.radius = renderAircraft[i].inside
+            ? aircraftSymbolRadius(renderAircraft[i])
+            : 4.0f;
+
         if (!renderAircraft[i].inside) {
-            if (mapVisible) {
-                projectToMapEdge(x, y, x, y);
-            } else {
-                float dxKm = 0;
-                float dyKm = 0;
-                float distKm = 0;
-                offsetKm(renderAircraft[i].renderLat, renderAircraft[i].renderLon, dxKm, dyKm, distKm);
-                if (distKm < 0.01f) continue;
-                float ang = atan2f(dxKm, dyKm);
-                x = cx + lroundf(sinf(ang) * (radius + 12));
-                y = cy - lroundf(cosf(ang) * (radius + 12));
-            }
             g.fillSmoothCircle(x, y, 4, colorPlane);
             continue;
         }
-        if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) continue;
+        if (x < 0 || x >= PANEL_X || y < 0 || y >= SCREEN_H) continue;
         drawAircraftSymbol(g, renderAircraft[i], x, y);
     }
 
+    size_t labelCount = prepareRadarLabels(
+        g,
+        renderAircraft,
+        renderCount,
+        renderSelectedHex
+    );
+    g.setTextSize(2);
+    int rangeTextWidth = g.textWidth(rangeLabel());
+    RadarLabels::LabelRectObstacle staticLabelObstacles[] = {
+        {static_cast<float>(cx - 12), 4.0f, 24.0f, 28.0f},
+        {static_cast<float>(cx - 12), static_cast<float>(SCREEN_H - 32), 24.0f, 28.0f},
+        {static_cast<float>(cx - radius - 30), static_cast<float>(cy - 14), 24.0f, 28.0f},
+        {static_cast<float>(cx + radius + 6), static_cast<float>(cy - 14), 24.0f, 28.0f},
+        {
+            static_cast<float>(cx + radius - 22 - rangeTextWidth / 2 - 2),
+            static_cast<float>(cy - 25),
+            static_cast<float>(rangeTextWidth + 4),
+            22.0f
+        },
+        {static_cast<float>(PANEL_X - 11), 0.0f, 11.0f, static_cast<float>(SCREEN_H)},
+    };
+    static uint32_t previousLabelLayoutMs = 0;
+    uint32_t labelLayoutNowMs = millis();
+    float labelLayoutDeltaSeconds = previousLabelLayoutMs == 0
+        ? (1.0f / 30.0f)
+        : static_cast<float>(labelLayoutNowMs - previousLabelLayoutMs) / 1000.0f;
+    previousLabelLayoutMs = labelLayoutNowMs;
+    uint32_t labelLayoutRevision = static_cast<uint32_t>(renderRangeIndex) |
+        (mapVisible ? 0x100U : 0U) |
+        (config.aircraftSymbolStyle == AircraftSymbolStyle::DetailedIcons ? 0x200U : 0U);
+    RadarLabels::LabelLayoutMetrics labelMetrics;
+    uint32_t labelLayoutStartedUs = micros();
+    aircraftLabelLayout.solve(
+        labelLayoutInputs,
+        labelCount,
+        labelAircraftObstacles,
+        aircraftObstacleCount,
+        staticLabelObstacles,
+        sizeof(staticLabelObstacles) / sizeof(staticLabelObstacles[0]),
+        RadarLabels::LabelLayoutBounds{4.0f, 4.0f, 508.0f, 476.0f},
+        labelLayoutNowMs,
+        labelLayoutRevision,
+        labelLayoutDeltaSeconds,
+        labelLayoutOutputs,
+        &labelMetrics
+    );
+    uint32_t labelLayoutElapsedUs = micros() - labelLayoutStartedUs;
+
     g.setTextSize(1);
-    for (size_t i = 0; i < renderCount; i++) {
-        if (!renderAircraft[i].inside) continue;
-        int x = renderAircraft[i].screenX;
-        int y = renderAircraft[i].screenY;
-        if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) continue;
-        bool labelRight = x < cx;
-        int labelOffset = 16;
-        if (config.aircraftSymbolStyle == AircraftSymbolStyle::DetailedIcons) {
-            labelOffset = AircraftIcons::halfExtent(
-                isRotorcraft(renderAircraft[i]),
-                planeSizeClass(renderAircraft[i])
-            ) + 3;
-        }
-        int tx = labelRight ? x + labelOffset : x - labelOffset;
-        const char *callsign = renderAircraft[i].callsign[0]
-            ? renderAircraft[i].callsign
-            : "????";
-        char altitudeLine[32] = {};
-        if (config.showLabelAltitude && renderAircraft[i].alt[0] != '\0') {
-            strlcpy(altitudeLine, renderAircraft[i].alt, sizeof(altitudeLine));
-        }
-        if (config.showLabelVerticalRate && renderAircraft[i].vsi[0] != '\0') {
-            if (altitudeLine[0] != '\0') strlcat(altitudeLine, " ", sizeof(altitudeLine));
-            strlcat(altitudeLine, renderAircraft[i].vsi, sizeof(altitudeLine));
-        }
+    g.setTextDatum(textdatum_t::top_left);
+    auto drawLabelPass = [&](bool priorityPass) {
+        for (size_t labelIndex = 0; labelIndex < labelCount; labelIndex++) {
+            const RadarLabelRender &label = radarLabels[labelIndex];
+            const RadarLabels::LabelLayoutOutput &layout =
+                labelLayoutOutputs[labelIndex];
+            if (!layout.visible || label.mustShow != priorityPass) continue;
 
-        struct LabelLine {
-            const char *text;
-            uint16_t color;
-        };
-        LabelLine lines[3];
-        size_t lineCount = 0;
-        if (config.showLabelCallsign) {
-            lines[lineCount++] = LabelLine{callsign, colorText};
+            int textX = lroundf(layout.x) + AIRCRAFT_LABEL_PADDING;
+            int textY = lroundf(layout.y) + AIRCRAFT_LABEL_PADDING;
+            for (size_t lineIndex = 0; lineIndex < label.lineCount; lineIndex++) {
+                const RadarLabelLine &line = label.lines[lineIndex];
+                int lineY = textY +
+                    static_cast<int>(lineIndex) * AIRCRAFT_LABEL_LINE_ADVANCE;
+                g.fillRect(
+                    textX - AIRCRAFT_LABEL_PADDING,
+                    lineY - AIRCRAFT_LABEL_PADDING,
+                    line.width + AIRCRAFT_LABEL_PADDING * 2,
+                    AIRCRAFT_LABEL_LINE_HEIGHT + AIRCRAFT_LABEL_PADDING * 2,
+                    colorBg
+                );
+                g.setTextColor(line.color, colorBg);
+                g.drawString(line.text, textX, lineY);
+            }
         }
-        if (config.showLabelType && renderAircraft[i].type[0] != '\0') {
-            lines[lineCount++] = LabelLine{renderAircraft[i].type, colorDim};
-        }
-        if (altitudeLine[0] != '\0') {
-            lines[lineCount++] = LabelLine{altitudeLine, colorWarn};
-        }
-        if (lineCount == 0) continue;
+    };
+    drawLabelPass(false);
+    drawLabelPass(true);
 
-        int labelTextHeight = AIRCRAFT_LABEL_LINE_HEIGHT +
-            static_cast<int>(lineCount - 1) * AIRCRAFT_LABEL_LINE_ADVANCE;
-        int maxLabelY = SCREEN_H - labelTextHeight - AIRCRAFT_LABEL_PADDING - 1;
-        int ty = std::max(10, std::min(maxLabelY, y - 10));
-
-        auto drawLineBackground = [&](const char *text, int lineY) {
-            int lineWidth = g.textWidth(text);
-            int lineX = labelRight ? tx : tx - lineWidth;
-            g.fillRect(
-                lineX - AIRCRAFT_LABEL_PADDING,
-                lineY - AIRCRAFT_LABEL_PADDING,
-                lineWidth + AIRCRAFT_LABEL_PADDING * 2,
-                AIRCRAFT_LABEL_LINE_HEIGHT + AIRCRAFT_LABEL_PADDING * 2,
-                colorBg
-            );
-        };
-
-        g.setTextDatum(labelRight ? textdatum_t::top_left : textdatum_t::top_right);
-        for (size_t lineIndex = 0; lineIndex < lineCount; lineIndex++) {
-            int lineY = ty + static_cast<int>(lineIndex) * AIRCRAFT_LABEL_LINE_ADVANCE;
-            drawLineBackground(lines[lineIndex].text, lineY);
-            g.setTextColor(lines[lineIndex].color, colorBg);
-            g.drawString(lines[lineIndex].text, tx, lineY);
-        }
+    if (logDraw) {
+        RADAR_LOGD(
+            "[labels] visible=%u hidden=%u max_overlap=%.2f solver_us=%lu\n",
+            static_cast<unsigned>(labelMetrics.visibleCount),
+            static_cast<unsigned>(labelMetrics.hiddenCount),
+            labelMetrics.maxOverlapPx,
+            static_cast<unsigned long>(labelLayoutElapsedUs)
+        );
     }
 
     drawAircraftList(
@@ -3439,6 +3602,73 @@ static void initPalette() {
     colorSelectedRow = screen.color565(5, 28, 19);
 }
 
+#if PLANE_RADAR_LOG_LEVEL >= PLANE_RADAR_LOG_LEVEL_DEBUG
+static void benchmarkAircraftLabelLayout() {
+    for (size_t i = 0; i < MAX_AIRCRAFT; i++) {
+        RadarLabels::LabelLayoutInput &input = labelLayoutInputs[i];
+        input = RadarLabels::LabelLayoutInput();
+        input.id = static_cast<uint32_t>(0x100000U + i);
+        input.anchorX = 245.0f + static_cast<float>(i % 8) * 4.0f;
+        input.anchorY = 225.0f + static_cast<float>(i / 8) * 4.0f;
+        input.width = 62.0f;
+        input.height = 27.0f;
+        input.symbolRadius = 12.0f;
+        input.courseDeg = static_cast<float>((i * 37U) % 360U);
+        input.distanceKm = static_cast<float>(i + 1);
+        input.courseValid = true;
+        input.mustShow = i < 2;
+
+        labelAircraftObstacles[i].x = input.anchorX;
+        labelAircraftObstacles[i].y = input.anchorY;
+        labelAircraftObstacles[i].radius = input.symbolRadius;
+    }
+
+    RadarLabels::LabelLayoutMetrics metrics;
+    aircraftLabelLayout.reset();
+    uint32_t startedUs = micros();
+    aircraftLabelLayout.solve(
+        labelLayoutInputs,
+        MAX_AIRCRAFT,
+        labelAircraftObstacles,
+        MAX_AIRCRAFT,
+        nullptr,
+        0,
+        RadarLabels::LabelLayoutBounds{4.0f, 4.0f, 508.0f, 476.0f},
+        millis(),
+        1,
+        1.0f / 30.0f,
+        labelLayoutOutputs,
+        &metrics
+    );
+    uint32_t initialUs = micros() - startedUs;
+
+    startedUs = micros();
+    aircraftLabelLayout.solve(
+        labelLayoutInputs,
+        MAX_AIRCRAFT,
+        labelAircraftObstacles,
+        MAX_AIRCRAFT,
+        nullptr,
+        0,
+        RadarLabels::LabelLayoutBounds{4.0f, 4.0f, 508.0f, 476.0f},
+        millis(),
+        1,
+        1.0f / 30.0f,
+        labelLayoutOutputs,
+        &metrics
+    );
+    uint32_t steadyUs = micros() - startedUs;
+    RADAR_LOGD(
+        "[labels] benchmark64 initial_us=%lu steady_us=%lu visible=%u hidden=%u\n",
+        static_cast<unsigned long>(initialUs),
+        static_cast<unsigned long>(steadyUs),
+        static_cast<unsigned>(metrics.visibleCount),
+        static_cast<unsigned>(metrics.hiddenCount)
+    );
+    aircraftLabelLayout.reset();
+}
+#endif
+
 void setup() {
     Serial.begin(115200);
     uint32_t serialStart = millis();
@@ -3616,6 +3846,9 @@ void setup() {
     if (!setupMode) {
         setupMode = waitForBootSetupHold(BOOT_SETUP_WINDOW_MS);
     }
+#if PLANE_RADAR_LOG_LEVEL >= PLANE_RADAR_LOG_LEVEL_DEBUG
+    benchmarkAircraftLabelLayout();
+#endif
     bootScreenActive = false;
     startNetworkTask();
     if (setupMode || portalActive) {
