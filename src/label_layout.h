@@ -113,6 +113,7 @@ private:
 
     State states_[kMaxLabels];
     WorkItem work_[kMaxLabels];
+    size_t orbitCursor_ = 0;
 };
 
 }  // namespace RadarLabels

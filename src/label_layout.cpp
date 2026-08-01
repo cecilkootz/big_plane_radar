@@ -17,6 +17,9 @@ static constexpr float kMovementDeadZonePx = 0.25f;
 static constexpr float kCourseAvoidDistancePx = 80.0f;
 static constexpr float kCourseConeCosineSquared = 0.58682409f;
 static constexpr float kInverseSqrtTwo = 0.70710678f;
+static constexpr float kOrbitMinExcessPx = 0.75f;
+static constexpr float kOrbitForceLimitPx = 2.0f;
+static constexpr size_t kOrbitLabelsPerFrame = 16;
 static constexpr uint8_t kHideAfterConflictFrames = 6;
 static constexpr uint8_t kShowAfterCleanFrames = 20;
 
@@ -137,6 +140,7 @@ static bool inputContainsId(
 void LabelLayout::reset() {
     memset(states_, 0, sizeof(states_));
     memset(work_, 0, sizeof(work_));
+    orbitCursor_ = 0;
 }
 
 void LabelLayout::solve(
@@ -436,6 +440,7 @@ void LabelLayout::solve(
     };
 
     const size_t iterations = hasNewLabel ? 12 : 3;
+    size_t orbitStart = workCount > 0 ? orbitCursor_ % workCount : 0;
     for (size_t iteration = 0; iteration < iterations; iteration++) {
         // Aircraft move much more slowly than labels. Reusing the aggregate force
         // for three relaxation steps preserves all obstacles while avoiding a
@@ -512,10 +517,12 @@ void LabelLayout::solve(
             float nearestY = clampFloat(input.anchorY, work.y, work.y + input.height);
             float edgeX = nearestX - input.anchorX;
             float edgeY = nearestY - input.anchorY;
-            float edgeDistance = sqrtf(edgeX * edgeX + edgeY * edgeY);
+            float edgeDistance = approximateLength(edgeX, edgeY);
             float directionX = edgeX;
             float directionY = edgeY;
             float directionDistance = edgeDistance;
+            float springForceX = 0.0f;
+            float springForceY = 0.0f;
             if (directionDistance < 0.001f) {
                 directionX = fromAnchorX;
                 directionY = fromAnchorY;
@@ -528,8 +535,10 @@ void LabelLayout::solve(
                 float unitY = directionY / directionDistance;
                 float targetDistance = input.symbolRadius + kPreferredSymbolGapPx;
                 float spring = (targetDistance - edgeDistance) * 0.28f;
-                work.forceX += unitX * spring;
-                work.forceY += unitY * spring;
+                springForceX = unitX * spring;
+                springForceY = unitY * spring;
+                work.forceX += springForceX;
+                work.forceY += springForceY;
             }
 
             if (isInsideForwardCone(
@@ -568,6 +577,41 @@ void LabelLayout::solve(
                     work.forceY += centerY < obstacleCenterY
                         ? -(overlapY + 1.0f)
                         : overlapY + 1.0f;
+                }
+            }
+
+            float targetDistance = input.symbolRadius + kPreferredSymbolGapPx;
+            float excessDistance = edgeDistance - targetDistance;
+            if (iteration % 3 == 0 &&
+                excessDistance > kOrbitMinExcessPx &&
+                (fromAnchorX != 0.0f || fromAnchorY != 0.0f)) {
+                size_t orbitOffset = i >= orbitStart
+                    ? i - orbitStart
+                    : i + workCount - orbitStart;
+                bool orbitScheduled = workCount <= kOrbitLabelsPerFrame ||
+                    orbitOffset < kOrbitLabelsPerFrame || input.mustShow;
+                if (!orbitScheduled) continue;
+                float centerDistance = approximateLength(fromAnchorX, fromAnchorY);
+                float radialX = fromAnchorX / centerDistance;
+                float radialY = fromAnchorY / centerDistance;
+                float avoidanceX = work.forceX - springForceX;
+                float avoidanceY = work.forceY - springForceY;
+                float outwardAvoidance = avoidanceX * radialX + avoidanceY * radialY;
+                if (outwardAvoidance > 0.1f) {
+                    float tangentX = -radialY;
+                    float tangentY = radialX;
+                    float tangentAvoidance = avoidanceX * tangentX +
+                        avoidanceY * tangentY;
+                    float orbitSign = fabsf(tangentAvoidance) >
+                            outwardAvoidance * 0.2f + 0.1f
+                        ? (tangentAvoidance > 0.0f ? 1.0f : -1.0f)
+                        : ((input.id & 1U) ? 1.0f : -1.0f);
+                    float orbitStrength = minFloat(
+                        kOrbitForceLimitPx,
+                        0.35f + excessDistance * 0.08f + outwardAvoidance * 0.15f
+                    );
+                    work.forceX += tangentX * orbitSign * orbitStrength;
+                    work.forceY += tangentY * orbitSign * orbitStrength;
                 }
             }
         }
@@ -619,6 +663,12 @@ void LabelLayout::solve(
                 );
             }
         }
+    }
+
+    if (workCount > kOrbitLabelsPerFrame) {
+        orbitCursor_ = (orbitStart + kOrbitLabelsPerFrame) % workCount;
+    } else {
+        orbitCursor_ = 0;
     }
 
     deltaSeconds = clampFloat(deltaSeconds, 0.0f, 0.1f);

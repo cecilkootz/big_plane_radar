@@ -243,6 +243,31 @@ static void testAnchorMovementAndTemporaryDisappearance() {
     CHECK(fabsf(output.y - firstY) < 5.0f);
 }
 
+static void testOrbitSearchKeepsBlockedLabelClose() {
+    LabelLayout layout;
+    layout.reset();
+    LabelLayoutInput input = makeInput(0xabc123, 260, 240);
+    AircraftObstacle obstacle = makeOwnerObstacle(input);
+    LabelLayoutOutput output;
+    layout.solve(
+        &input, 1, &obstacle, 1, nullptr, 0, kBounds,
+        1000, 1, 0.033f, &output
+    );
+
+    LabelRectObstacle blocker{264, 220, 28, 40};
+    for (uint32_t frame = 1; frame <= 90; frame++) {
+        layout.solve(
+            &input, 1, &obstacle, 1, &blocker, 1, kBounds,
+            1000 + frame * 33, 1, 0.033f, &output
+        );
+    }
+
+    float centerY = output.y + input.height * 0.5f;
+    CHECK(fabsf(centerY - input.anchorY) > 5.0f);
+    CHECK(labelGapFromSymbol(input, output) < 24.0f);
+    CHECK(output.visible);
+}
+
 static void runDenseScene(size_t count) {
     LabelLayout layout;
     layout.reset();
@@ -296,6 +321,7 @@ int main() {
     testInputOrderDoesNotChangeLayout();
     testStaticObstacleAndLayoutRevision();
     testAnchorMovementAndTemporaryDisappearance();
+    testOrbitSearchKeepsBlockedLabelClose();
     testDenseSceneAndMandatoryLabels();
     testNoHeapAllocationDuringSolve();
     puts("label_layout tests passed");
