@@ -336,8 +336,10 @@ static void testCrossingLabelsKeepOrbitDirection() {
     float yieldingRelativeY = outputs[1].y + inputs[1].height * 0.5f -
         inputs[1].anchorY;
     CHECK(sideChanges == 0);
-    CHECK(fabsf(winnerRelativeY) < 2.0f);
+    CHECK(fabsf(winnerRelativeY) > 4.0f);
     CHECK(fabsf(yieldingRelativeY) > 4.0f);
+    CHECK(winnerRelativeY * yieldingRelativeY < 0.0f);
+    CHECK(!labelsOverlap(inputs[0], outputs[0], inputs[1], outputs[1]));
 }
 
 static void testFullCircleOrbitKeepsAStableRadius() {

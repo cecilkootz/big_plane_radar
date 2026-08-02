@@ -89,8 +89,10 @@ private:
         uint32_t orbitLockUntilMs = 0;
         uint32_t orbitCooldownUntilMs = 0;
         uint32_t orbitGapCompactAfterMs = 0;
+        uint32_t clusterRetryAfterMs = 0;
         uint8_t conflictFrames = 0;
         uint8_t cleanFrames = 0;
+        uint8_t clusterConflictFrames = 0;
         int8_t orbitDirection = 0;
         bool occupied = false;
         bool visible = true;
@@ -119,8 +121,19 @@ private:
         bool coolingDown = false;
     };
 
+    struct ClusterCandidateScratch {
+        float x;
+        float y;
+        float angle;
+        float gap;
+        float cost;
+    };
+
     State states_[kMaxLabels];
     WorkItem work_[kMaxLabels];
+    ClusterCandidateScratch clusterCandidates_[8][20];
+    size_t clusterQueue_[kMaxLabels];
+    size_t clusterComponent_[kMaxLabels];
     size_t orbitCursor_ = 0;
     size_t collisionSearchCursor_ = 0;
 };

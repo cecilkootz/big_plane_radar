@@ -25,6 +25,11 @@ static constexpr uint32_t kOrbitDirectionLockMs = 700;
 static constexpr uint32_t kOrbitCooldownMs = 1500;
 static constexpr uint32_t kOrbitGapCompactDelayMs = 1000;
 static constexpr float kOrbitGapReturnPxPerSecond = 8.0f;
+static constexpr size_t kClusterMaxLabels = 8;
+static constexpr size_t kClusterMaxCandidates = 20;
+static constexpr uint8_t kClusterTriggerFrames = 3;
+static constexpr uint32_t kClusterRetryMs = 500;
+static constexpr size_t kClusterSearchNodeLimit = 12000;
 static constexpr size_t kCollisionSearchesPerFrame = 8;
 static constexpr uint8_t kHideAfterConflictFrames = 6;
 static constexpr uint8_t kShowAfterCleanFrames = 20;
@@ -381,6 +386,8 @@ void LabelLayout::solve(
             state.orbitLockUntilMs = 0;
             state.orbitCooldownUntilMs = 0;
             state.orbitGapCompactAfterMs = 0;
+            state.clusterRetryAfterMs = 0;
+            state.clusterConflictFrames = 0;
             state.orbitAngleValid = false;
 
             const float directions[8][2] = {
@@ -1112,8 +1119,7 @@ void LabelLayout::solve(
         }
     };
 
-    for (size_t collisionIndex = 0; collisionIndex < workCount; collisionIndex++) {
-        size_t workIndex = collisionOrder[collisionIndex];
+    for (size_t workIndex = 0; workIndex < workCount; workIndex++) {
         WorkItem &work = work_[workIndex];
         const LabelLayoutInput &input = *work.input;
         if (!work.state->orbitAngleValid &&
@@ -1149,6 +1155,353 @@ void LabelLayout::solve(
             }
         }
         advanceOrbitTarget(workIndex);
+    }
+
+    // Resolve a connected overlap as one assignment so an earlier reservation
+    // can move when that creates a better plan for the whole local cluster.
+    bool clusterPending[kMaxLabels] = {};
+    bool clusterVisited[kMaxLabels] = {};
+    bool componentMask[kMaxLabels] = {};
+    float plannedX[kMaxLabels] = {};
+    float plannedY[kMaxLabels] = {};
+    for (size_t i = 0; i < workCount; i++) {
+        WorkItem &work = work_[i];
+        State &state = *work.state;
+        if (state.orbitAngleValid) {
+            float clampDistance = 0.0f;
+            positionAtDirection(
+                *work.input,
+                bounds,
+                cosf(state.orbitTargetAngle),
+                sinf(state.orbitTargetAngle),
+                state.orbitTargetGap,
+                plannedX[i],
+                plannedY[i],
+                clampDistance
+            );
+        } else {
+            plannedX[i] = work.x;
+            plannedY[i] = work.y;
+        }
+        if (work.orbiting || work.coolingDown ||
+            !(state.visible || work.input->mustShow)) {
+            state.clusterConflictFrames = 0;
+        }
+    }
+
+    auto canJoinCluster = [&](size_t workIndex) {
+        const WorkItem &work = work_[workIndex];
+        return (work.state->visible || work.input->mustShow) &&
+            work.state->orbitAngleValid &&
+            !work.orbiting &&
+            !work.coolingDown;
+    };
+
+    auto plannedLabelsOverlap = [&](size_t leftIndex, size_t rightIndex) {
+        const WorkItem &left = work_[leftIndex];
+        const WorkItem &right = work_[rightIndex];
+        return rectOverlapDepthWithMargin(
+            plannedX[leftIndex],
+            plannedY[leftIndex],
+            left.input->width,
+            left.input->height,
+            plannedX[rightIndex],
+            plannedY[rightIndex],
+            right.input->width,
+            right.input->height,
+            kLabelCollisionMarginPx
+        ) > 0.0f;
+    };
+
+    for (size_t seed = 0; seed < workCount; seed++) {
+        if (clusterVisited[seed] || !canJoinCluster(seed)) continue;
+
+        size_t *queue = clusterQueue_;
+        size_t *component = clusterComponent_;
+        size_t queueHead = 0;
+        size_t queueCount = 1;
+        size_t componentCount = 0;
+        queue[0] = seed;
+        clusterVisited[seed] = true;
+        while (queueHead < queueCount) {
+            size_t current = queue[queueHead++];
+            component[componentCount++] = current;
+            for (size_t candidate = 0; candidate < workCount; candidate++) {
+                if (clusterVisited[candidate] || !canJoinCluster(candidate)) continue;
+                if (!plannedLabelsOverlap(current, candidate)) continue;
+                clusterVisited[candidate] = true;
+                queue[queueCount++] = candidate;
+            }
+        }
+
+        if (componentCount < 2) {
+            work_[seed].state->clusterConflictFrames = 0;
+            continue;
+        }
+
+        bool ready = componentCount <= kClusterMaxLabels;
+        bool retryReady = true;
+        for (size_t member = 0; member < componentCount; member++) {
+            size_t workIndex = component[member];
+            clusterPending[workIndex] = true;
+            State &state = *work_[workIndex].state;
+            if (state.clusterConflictFrames < 255) {
+                state.clusterConflictFrames++;
+            }
+            if (state.clusterConflictFrames < kClusterTriggerFrames) ready = false;
+            if (deadlineActive(nowMs, state.clusterRetryAfterMs)) retryReady = false;
+        }
+        if (!ready || !retryReady) continue;
+
+        memset(componentMask, 0, sizeof(componentMask));
+        for (size_t member = 0; member < componentCount; member++) {
+            componentMask[component[member]] = true;
+        }
+
+        uint8_t candidateCounts[kClusterMaxLabels] = {};
+        static constexpr float kInnerOffsetsDeg[] = {
+            0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180
+        };
+        static constexpr float kOuterOffsetsDeg[] = {
+            0, 45, -45, 90, -90, 135, -135, 180
+        };
+
+        bool candidatesComplete = true;
+        for (size_t member = 0; member < componentCount; member++) {
+            size_t workIndex = component[member];
+            WorkItem &work = work_[workIndex];
+            State &state = *work.state;
+            const LabelLayoutInput &input = *work.input;
+            float baseAngle = state.orbitTargetAngle;
+            float baseGap = maxFloat(kPreferredSymbolGapPx, state.orbitTargetGap);
+            float maxGap = input.mustShow ? kPriorityMaxGapPx : kNormalMaxGapPx;
+            float outerGap = minFloat(maxGap, maxFloat(16.0f, baseGap + 12.0f));
+
+            auto addCandidate = [&](float offsetDeg, float gap, float ringPenalty) {
+                if (candidateCounts[member] >= kClusterMaxCandidates) return;
+                float offset = offsetDeg * kDegreesToRadians;
+                float angle = normalizeAngle(baseAngle + offset);
+                float x = 0.0f;
+                float y = 0.0f;
+                float clampDistance = 0.0f;
+                positionAtDirection(
+                    input,
+                    bounds,
+                    cosf(angle),
+                    sinf(angle),
+                    gap,
+                    x,
+                    y,
+                    clampDistance
+                );
+                if (placementHasHardConflict(work, x, y)) return;
+                for (size_t otherIndex = 0; otherIndex < workCount; otherIndex++) {
+                    if (componentMask[otherIndex] ||
+                        !(work_[otherIndex].state->visible ||
+                          work_[otherIndex].input->mustShow)) {
+                        continue;
+                    }
+                    const WorkItem &other = work_[otherIndex];
+                    if (rectOverlapDepthWithMargin(
+                            x,
+                            y,
+                            input.width,
+                            input.height,
+                            plannedX[otherIndex],
+                            plannedY[otherIndex],
+                            other.input->width,
+                            other.input->height,
+                            kLabelCollisionMarginPx) > 0.0f) {
+                        return;
+                    }
+                }
+                for (size_t existing = 0;
+                     existing < candidateCounts[member];
+                     existing++) {
+                    if (fabsf(clusterCandidates_[member][existing].x - x) < 0.25f &&
+                        fabsf(clusterCandidates_[member][existing].y - y) < 0.25f) {
+                        return;
+                    }
+                }
+
+                int8_t direction = offsetDeg > 0.0f ? 1 :
+                    (offsetDeg < 0.0f ? -1 : 0);
+                float directionPenalty = direction != 0 &&
+                    state.orbitDirection != 0 &&
+                    direction != state.orbitDirection &&
+                    deadlineActive(nowMs, state.orbitLockUntilMs)
+                    ? 8.0f
+                    : 0.0f;
+                ClusterCandidateScratch value{
+                    x,
+                    y,
+                    angle,
+                    gap,
+                    fabsf(offsetDeg) * 0.04f +
+                        fabsf(gap - baseGap) * 0.6f +
+                        clampDistance * 80.0f + ringPenalty + directionPenalty
+                };
+                size_t insertAt = candidateCounts[member];
+                while (insertAt > 0 &&
+                       clusterCandidates_[member][insertAt - 1].cost > value.cost) {
+                    clusterCandidates_[member][insertAt] =
+                        clusterCandidates_[member][insertAt - 1];
+                    insertAt--;
+                }
+                clusterCandidates_[member][insertAt] = value;
+                candidateCounts[member]++;
+            };
+
+            for (float offsetDeg : kInnerOffsetsDeg) {
+                addCandidate(offsetDeg, baseGap, 0.0f);
+            }
+            if (outerGap > baseGap + 0.5f) {
+                for (float offsetDeg : kOuterOffsetsDeg) {
+                    addCandidate(offsetDeg, outerGap, 6.0f);
+                }
+            }
+            if (candidateCounts[member] == 0) candidatesComplete = false;
+        }
+
+        int8_t selected[kClusterMaxLabels];
+        int8_t bestSelected[kClusterMaxLabels];
+        uint8_t nextCandidate[kClusterMaxLabels] = {};
+        size_t solveOrder[kClusterMaxLabels];
+        for (size_t member = 0; member < componentCount; member++) {
+            selected[member] = -1;
+            bestSelected[member] = -1;
+            solveOrder[member] = member;
+        }
+        for (size_t i = 1; i < componentCount; i++) {
+            size_t value = solveOrder[i];
+            size_t j = i;
+            while (j > 0) {
+                size_t left = solveOrder[j - 1];
+                bool valueBeforeLeft = candidateCounts[value] != candidateCounts[left]
+                    ? candidateCounts[value] < candidateCounts[left]
+                    : (work_[component[value]].input->mustShow !=
+                       work_[component[left]].input->mustShow
+                        ? work_[component[value]].input->mustShow
+                        : work_[component[value]].input->id <
+                          work_[component[left]].input->id);
+                if (!valueBeforeLeft) break;
+                solveOrder[j] = solveOrder[j - 1];
+                j--;
+            }
+            solveOrder[j] = value;
+        }
+
+        bool found = false;
+        float bestCost = 1.0e30f;
+        float depthCost[kClusterMaxLabels + 1] = {};
+        size_t visitedNodes = 0;
+        size_t depth = 0;
+        while (candidatesComplete && visitedNodes < kClusterSearchNodeLimit) {
+            if (depth == componentCount) {
+                found = true;
+                if (depthCost[depth] < bestCost) {
+                    bestCost = depthCost[depth];
+                    for (size_t member = 0; member < componentCount; member++) {
+                        bestSelected[member] = selected[member];
+                    }
+                }
+                depth--;
+                selected[solveOrder[depth]] = -1;
+                continue;
+            }
+            size_t member = solveOrder[depth];
+            bool advanced = false;
+            while (nextCandidate[member] < candidateCounts[member] &&
+                   visitedNodes < kClusterSearchNodeLimit) {
+                size_t candidateIndex = nextCandidate[member]++;
+                visitedNodes++;
+                const ClusterCandidateScratch &candidate =
+                    clusterCandidates_[member][candidateIndex];
+                float candidateCost = depthCost[depth] + candidate.cost;
+                if (candidateCost >= bestCost) continue;
+                bool overlaps = false;
+                for (size_t otherMember = 0;
+                     otherMember < componentCount;
+                     otherMember++) {
+                    if (selected[otherMember] < 0) continue;
+                    const ClusterCandidateScratch &other = clusterCandidates_[otherMember][
+                        static_cast<size_t>(selected[otherMember])
+                    ];
+                    const LabelLayoutInput &input =
+                        *work_[component[member]].input;
+                    const LabelLayoutInput &otherInput =
+                        *work_[component[otherMember]].input;
+                    if (rectOverlapDepthWithMargin(
+                            candidate.x,
+                            candidate.y,
+                            input.width,
+                            input.height,
+                            other.x,
+                            other.y,
+                            otherInput.width,
+                            otherInput.height,
+                            kLabelCollisionMarginPx) > 0.0f) {
+                        overlaps = true;
+                        break;
+                    }
+                }
+                if (overlaps) continue;
+                selected[member] = static_cast<int8_t>(candidateIndex);
+                depthCost[depth + 1] = candidateCost;
+                depth++;
+                if (depth < componentCount) {
+                    nextCandidate[solveOrder[depth]] = 0;
+                }
+                advanced = true;
+                break;
+            }
+            if (advanced) continue;
+            selected[member] = -1;
+            nextCandidate[member] = 0;
+            if (depth == 0) break;
+            depth--;
+            selected[solveOrder[depth]] = -1;
+        }
+
+        if (!found) {
+            for (size_t member = 0; member < componentCount; member++) {
+                work_[component[member]].state->clusterRetryAfterMs =
+                    nowMs + kClusterRetryMs;
+            }
+            continue;
+        }
+
+        for (size_t member = 0; member < componentCount; member++) {
+            size_t workIndex = component[member];
+            WorkItem &work = work_[workIndex];
+            State &state = *work.state;
+            const ClusterCandidateScratch &target = clusterCandidates_[member][
+                static_cast<size_t>(bestSelected[member])
+            ];
+            float angleDelta = normalizeAngle(target.angle - state.orbitTargetAngle);
+            float gapDelta = target.gap - state.orbitTargetGap;
+            state.orbitTargetAngle = target.angle;
+            state.orbitTargetGap = target.gap;
+            state.orbitTargetActive = fabsf(angleDelta) > kOrbitArrivalAngleRad ||
+                fabsf(gapDelta) > 0.75f;
+            state.orbitAngleValid = true;
+            state.orbitDirection = angleDelta > 0.0f ? 1 :
+                (angleDelta < 0.0f ? -1 : 0);
+            state.orbitLockUntilMs = nowMs + kOrbitDirectionLockMs;
+            state.orbitCooldownUntilMs = 0;
+            state.orbitGapCompactAfterMs = 0;
+            state.clusterConflictFrames = 0;
+            state.clusterRetryAfterMs = 0;
+        }
+        for (size_t member = 0; member < componentCount; member++) {
+            advanceOrbitTarget(component[member]);
+        }
+    }
+
+    for (size_t collisionIndex = 0; collisionIndex < workCount; collisionIndex++) {
+        size_t workIndex = collisionOrder[collisionIndex];
+        WorkItem &work = work_[workIndex];
+        const LabelLayoutInput &input = *work.input;
         float conflictDepth = work.orbiting || work.coolingDown
             ? 0.0f
             : labelConflictDepth(workIndex, work.x, work.y);
@@ -1157,7 +1510,9 @@ void LabelLayout::solve(
             : collisionIndex + workCount - collisionSearchStart;
         bool searchScheduled = workCount <= kCollisionSearchesPerFrame ||
             searchOffset < kCollisionSearchesPerFrame || input.mustShow;
-        if (conflictDepth > 0.0f && searchScheduled) {
+        if (conflictDepth > 0.0f &&
+            searchScheduled &&
+            !clusterPending[workIndex]) {
             float centerX = work.x + input.width * 0.5f;
             float centerY = work.y + input.height * 0.5f;
             float radialX = centerX - input.anchorX;
