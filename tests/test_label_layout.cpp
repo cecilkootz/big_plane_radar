@@ -109,6 +109,25 @@ static float labelAngle(
     );
 }
 
+static float normalizeTestAngle(float angle) {
+    static constexpr float kPi = 3.14159265358979323846f;
+    while (angle > kPi) angle -= 2.0f * kPi;
+    while (angle <= -kPi) angle += 2.0f * kPi;
+    return angle;
+}
+
+static bool labelsOverlap(
+    const LabelLayoutInput &leftInput,
+    const LabelLayoutOutput &leftOutput,
+    const LabelLayoutInput &rightInput,
+    const LabelLayoutOutput &rightOutput
+) {
+    return leftOutput.x < rightOutput.x + rightInput.width &&
+        leftOutput.x + leftInput.width > rightOutput.x &&
+        leftOutput.y < rightOutput.y + rightInput.height &&
+        leftOutput.y + leftInput.height > rightOutput.y;
+}
+
 static void testSingleAircraftAndCourseCone() {
     LabelLayout layout;
     layout.reset();
@@ -366,6 +385,65 @@ static void testFullCircleOrbitKeepsAStableRadius() {
     CHECK(stayedVisible);
 }
 
+static void testConvergingLabelsReserveDifferentDestinations() {
+    LabelLayout layout;
+    layout.reset();
+    LabelLayoutInput inputs[3] = {
+        makeInput(10, 260, 240),
+        makeInput(20, 180, 240),
+        makeInput(30, 340, 240),
+    };
+    for (LabelLayoutInput &input : inputs) input.courseValid = false;
+    LabelLayoutOutput outputs[3];
+    layout.solve(
+        inputs, 3, nullptr, 0, nullptr, 0, kBounds,
+        1000, 1, 0.033f, outputs
+    );
+
+    inputs[1].anchorX = 260;
+    inputs[2].anchorX = 260;
+    layout.solve(
+        inputs, 3, nullptr, 0, nullptr, 0, kBounds,
+        1033, 1, 0.033f, outputs
+    );
+    float previousAngles[2] = {
+        labelAngle(inputs[1], outputs[1]),
+        labelAngle(inputs[2], outputs[2]),
+    };
+    int movementDirections[2] = {};
+    size_t directionChanges[2] = {};
+    bool stayedVisible = true;
+    for (uint32_t frame = 2; frame <= 180; frame++) {
+        layout.solve(
+            inputs, 3, nullptr, 0, nullptr, 0, kBounds,
+            1000 + frame * 33, 1, 0.033f, outputs
+        );
+        for (size_t movingIndex = 0; movingIndex < 2; movingIndex++) {
+            size_t outputIndex = movingIndex + 1;
+            float angle = labelAngle(inputs[outputIndex], outputs[outputIndex]);
+            float delta = normalizeTestAngle(angle - previousAngles[movingIndex]);
+            if (fabsf(delta) > 0.005f) {
+                int direction = delta > 0.0f ? 1 : -1;
+                if (movementDirections[movingIndex] != 0 &&
+                    direction != movementDirections[movingIndex]) {
+                    directionChanges[movingIndex]++;
+                }
+                movementDirections[movingIndex] = direction;
+            }
+            previousAngles[movingIndex] = angle;
+        }
+        stayedVisible = stayedVisible && outputs[0].visible &&
+            outputs[1].visible && outputs[2].visible;
+    }
+
+    CHECK(directionChanges[0] == 0);
+    CHECK(directionChanges[1] == 0);
+    CHECK(!labelsOverlap(inputs[0], outputs[0], inputs[1], outputs[1]));
+    CHECK(!labelsOverlap(inputs[0], outputs[0], inputs[2], outputs[2]));
+    CHECK(!labelsOverlap(inputs[1], outputs[1], inputs[2], outputs[2]));
+    CHECK(stayedVisible);
+}
+
 static void runDenseScene(size_t count) {
     LabelLayout layout;
     layout.reset();
@@ -422,6 +500,7 @@ int main() {
     testOrbitSearchKeepsBlockedLabelClose();
     testCrossingLabelsKeepOrbitDirection();
     testFullCircleOrbitKeepsAStableRadius();
+    testConvergingLabelsReserveDifferentDestinations();
     testDenseSceneAndMandatoryLabels();
     testNoHeapAllocationDuringSolve();
     puts("label_layout tests passed");

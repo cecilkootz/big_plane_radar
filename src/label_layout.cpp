@@ -22,6 +22,7 @@ static constexpr float kOrbitForceLimitPx = 2.0f;
 static constexpr size_t kOrbitLabelsPerFrame = 16;
 static constexpr float kLabelCollisionMarginPx = 2.5f;
 static constexpr uint32_t kOrbitDirectionLockMs = 700;
+static constexpr uint32_t kOrbitCooldownMs = 1500;
 static constexpr size_t kCollisionSearchesPerFrame = 8;
 static constexpr uint8_t kHideAfterConflictFrames = 6;
 static constexpr uint8_t kShowAfterCleanFrames = 20;
@@ -126,6 +127,48 @@ static void clampToBounds(
     float maxY = maxFloat(bounds.top, bounds.bottom - height);
     x = clampFloat(x, bounds.left, maxX);
     y = clampFloat(y, bounds.top, maxY);
+}
+
+static void positionAtDirection(
+    const LabelLayoutInput &input,
+    const LabelLayoutBounds &bounds,
+    float directionX,
+    float directionY,
+    float &x,
+    float &y,
+    float &clampDistance
+) {
+    float halfWidth = input.width * 0.5f;
+    float halfHeight = input.height * 0.5f;
+    float targetDistance = input.symbolRadius + kPreferredSymbolGapPx;
+    float low = 0.0f;
+    float high = targetDistance +
+        sqrtf(halfWidth * halfWidth + halfHeight * halfHeight) + 2.0f;
+    float targetSquared = targetDistance * targetDistance;
+    for (size_t step = 0; step < 10; step++) {
+        float distance = (low + high) * 0.5f;
+        float candidateX = input.anchorX + directionX * distance - halfWidth;
+        float candidateY = input.anchorY + directionY * distance - halfHeight;
+        float actualSquared = pointToRectDistanceSquared(
+            input.anchorX,
+            input.anchorY,
+            candidateX,
+            candidateY,
+            input.width,
+            input.height
+        );
+        if (actualSquared < targetSquared) {
+            low = distance;
+        } else {
+            high = distance;
+        }
+    }
+    x = input.anchorX + directionX * high - halfWidth;
+    y = input.anchorY + directionY * high - halfHeight;
+    float unclampedX = x;
+    float unclampedY = y;
+    clampToBounds(x, y, input.width, input.height, bounds);
+    clampDistance = fabsf(x - unclampedX) + fabsf(y - unclampedY);
 }
 
 static void courseVectors(
@@ -313,6 +356,8 @@ void LabelLayout::solve(
             state.orbitTargetAngle = 0.0f;
             state.orbitDirection = 0;
             state.orbitLockUntilMs = 0;
+            state.orbitCooldownUntilMs = 0;
+            state.orbitAngleValid = false;
 
             const float directions[8][2] = {
                 {work.rightX, work.rightY},
@@ -425,6 +470,10 @@ void LabelLayout::solve(
             }
             work.x = bestX;
             work.y = bestY;
+            float radialX = work.x + input.width * 0.5f - input.anchorX;
+            float radialY = work.y + input.height * 0.5f - input.anchorY;
+            state.orbitTargetAngle = atan2f(radialY, radialX);
+            state.orbitAngleValid = true;
         }
 
         work.baseX = work.x;
@@ -434,6 +483,74 @@ void LabelLayout::solve(
         state.width = input.width;
         state.height = input.height;
         state.layoutRevision = layoutRevision;
+    }
+
+    auto placementHasHardConflict = [&](const WorkItem &work, float x, float y) {
+        const LabelLayoutInput &input = *work.input;
+        if (isInsideForwardCone(
+                input,
+                x + input.width * 0.5f,
+                y + input.height * 0.5f,
+                work.forwardX,
+                work.forwardY)) {
+            return true;
+        }
+        for (size_t obstacleIndex = 0;
+             obstacleIndex < aircraftObstacleCount;
+             obstacleIndex++) {
+            const AircraftObstacle &obstacle = aircraftObstacles[obstacleIndex];
+            float required = obstacle.radius + kMinimumSymbolGapPx;
+            if (pointToRectDistanceSquared(
+                    obstacle.x,
+                    obstacle.y,
+                    x,
+                    y,
+                    input.width,
+                    input.height) < required * required) {
+                return true;
+            }
+        }
+        for (size_t obstacleIndex = 0;
+             obstacleIndex < staticObstacleCount;
+             obstacleIndex++) {
+            const LabelRectObstacle &obstacle = staticObstacles[obstacleIndex];
+            if (rectOverlapDepthWithMargin(
+                    x,
+                    y,
+                    input.width,
+                    input.height,
+                    obstacle.x,
+                    obstacle.y,
+                    obstacle.width,
+                    obstacle.height,
+                    1.0f) > 0.0f) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (size_t i = 0; i < workCount; i++) {
+        WorkItem &work = work_[i];
+        State &state = *work.state;
+        if (!state.orbitAngleValid) continue;
+        float targetX = 0.0f;
+        float targetY = 0.0f;
+        float clampDistance = 0.0f;
+        positionAtDirection(
+            *work.input,
+            bounds,
+            cosf(state.orbitTargetAngle),
+            sinf(state.orbitTargetAngle),
+            targetX,
+            targetY,
+            clampDistance
+        );
+        if (placementHasHardConflict(work, targetX, targetY)) {
+            state.orbitTargetActive = false;
+            state.orbitAngleValid = false;
+            state.orbitCooldownUntilMs = 0;
+        }
     }
 
     auto updateAircraftForce = [&](WorkItem &work) {
@@ -491,7 +608,12 @@ void LabelLayout::solve(
         // 64x64 scan on every sub-step.
         if (iteration % 3 == 0) {
             for (size_t i = 0; i < workCount; i++) {
-                updateAircraftForce(work_[i]);
+                if (work_[i].state->orbitAngleValid) {
+                    work_[i].aircraftForceX = 0.0f;
+                    work_[i].aircraftForceY = 0.0f;
+                } else {
+                    updateAircraftForce(work_[i]);
+                }
             }
         }
         for (size_t i = 0; i < workCount; i++) {
@@ -499,7 +621,7 @@ void LabelLayout::solve(
             work.forceX = work.aircraftForceX;
             work.forceY = work.aircraftForceY;
             const LabelLayoutInput &input = *work.input;
-            if (work.state->orbitTargetActive) {
+            if (work.state->orbitAngleValid) {
                 work.forceX = 0.0f;
                 work.forceY = 0.0f;
                 continue;
@@ -748,6 +870,8 @@ void LabelLayout::solve(
     };
 
     bool reserved[kMaxLabels] = {};
+    float reservedX[kMaxLabels] = {};
+    float reservedY[kMaxLabels] = {};
     size_t collisionSearchStart = workCount > 0
         ? collisionSearchCursor_ % workCount
         : 0;
@@ -762,8 +886,8 @@ void LabelLayout::solve(
                 y,
                 input.width,
                 input.height,
-                other.x,
-                other.y,
+                reservedX[otherIndex],
+                reservedY[otherIndex],
                 other.input->width,
                 other.input->height,
                 kLabelCollisionMarginPx
@@ -771,45 +895,6 @@ void LabelLayout::solve(
             if (overlap > deepest) deepest = overlap;
         }
         return deepest;
-    };
-
-    auto positionAtDirection = [&](const LabelLayoutInput &input,
-                                   float directionX,
-                                   float directionY,
-                                   float &x,
-                                   float &y,
-                                   float &clampDistance) {
-        float halfWidth = input.width * 0.5f;
-        float halfHeight = input.height * 0.5f;
-        float targetDistance = input.symbolRadius + kPreferredSymbolGapPx;
-        float low = 0.0f;
-        float high = targetDistance +
-            sqrtf(halfWidth * halfWidth + halfHeight * halfHeight) + 2.0f;
-        float targetSquared = targetDistance * targetDistance;
-        for (size_t step = 0; step < 7; step++) {
-            float distance = (low + high) * 0.5f;
-            float candidateX = input.anchorX + directionX * distance - halfWidth;
-            float candidateY = input.anchorY + directionY * distance - halfHeight;
-            float actualSquared = pointToRectDistanceSquared(
-                input.anchorX,
-                input.anchorY,
-                candidateX,
-                candidateY,
-                input.width,
-                input.height
-            );
-            if (actualSquared < targetSquared) {
-                low = distance;
-            } else {
-                high = distance;
-            }
-        }
-        x = input.anchorX + directionX * high - halfWidth;
-        y = input.anchorY + directionY * high - halfHeight;
-        float unclampedX = x;
-        float unclampedY = y;
-        clampToBounds(x, y, input.width, input.height, bounds);
-        clampDistance = fabsf(x - unclampedX) + fabsf(y - unclampedY);
     };
 
     auto placementScore = [&](size_t workIndex,
@@ -882,8 +967,8 @@ void LabelLayout::solve(
                 y,
                 input.width,
                 input.height,
-                other.x,
-                other.y,
+                reservedX[otherIndex],
+                reservedY[otherIndex],
                 other.input->width,
                 other.input->height,
                 kLabelCollisionMarginPx
@@ -896,9 +981,13 @@ void LabelLayout::solve(
     auto advanceOrbitTarget = [&](size_t workIndex) {
         WorkItem &work = work_[workIndex];
         State &state = *work.state;
-        if (!state.orbitTargetActive) return;
+        if (!state.orbitAngleValid) return;
 
-        work.orbiting = true;
+        bool moving = state.orbitTargetActive;
+        bool coolingDown = !moving &&
+            deadlineActive(nowMs, state.orbitCooldownUntilMs);
+        work.orbiting = moving;
+        work.coolingDown = coolingDown;
         const LabelLayoutInput &input = *work.input;
         float centerX = work.x + input.width * 0.5f;
         float centerY = work.y + input.height * 0.5f;
@@ -913,16 +1002,20 @@ void LabelLayout::solve(
             remaining = kPi * static_cast<float>(state.orbitDirection);
         }
 
-        float maxAngleStep = centerDistance > 1.0f
-            ? maxMovement / centerDistance
-            : fabsf(remaining);
-        float angleStep = clampFloat(remaining, -maxAngleStep, maxAngleStep);
-        float nextAngle = currentAngle + angleStep;
+        float nextAngle = state.orbitTargetAngle;
+        if (moving) {
+            float maxAngleStep = centerDistance > 1.0f
+                ? maxMovement / centerDistance
+                : fabsf(remaining);
+            float angleStep = clampFloat(remaining, -maxAngleStep, maxAngleStep);
+            nextAngle = currentAngle + angleStep;
+        }
         float candidateX = 0.0f;
         float candidateY = 0.0f;
         float clampDistance = 0.0f;
         positionAtDirection(
             input,
+            bounds,
             cosf(nextAngle),
             sinf(nextAngle),
             candidateX,
@@ -935,6 +1028,7 @@ void LabelLayout::solve(
         float targetY = 0.0f;
         positionAtDirection(
             input,
+            bounds,
             cosf(state.orbitTargetAngle),
             sinf(state.orbitTargetAngle),
             targetX,
@@ -951,8 +1045,12 @@ void LabelLayout::solve(
             state.orbitTargetAngle - actualAngle
         ));
         float positionError = approximateLength(work.x - targetX, work.y - targetY);
-        if (angleError <= kOrbitArrivalAngleRad && positionError <= 0.75f) {
+        if (moving &&
+            angleError <= kOrbitArrivalAngleRad &&
+            positionError <= 0.75f) {
             state.orbitTargetActive = false;
+            state.orbitCooldownUntilMs = nowMs + kOrbitCooldownMs;
+            work.coolingDown = true;
         }
         if (state.orbitDirection != 0) {
             state.orbitLockUntilMs = nowMs + kOrbitDirectionLockMs;
@@ -963,8 +1061,15 @@ void LabelLayout::solve(
         size_t workIndex = collisionOrder[collisionIndex];
         WorkItem &work = work_[workIndex];
         const LabelLayoutInput &input = *work.input;
+        if (!work.state->orbitAngleValid &&
+            !placementHasHardConflict(work, work.x, work.y)) {
+            float radialX = work.x + input.width * 0.5f - input.anchorX;
+            float radialY = work.y + input.height * 0.5f - input.anchorY;
+            work.state->orbitTargetAngle = atan2f(radialY, radialX);
+            work.state->orbitAngleValid = true;
+        }
         advanceOrbitTarget(workIndex);
-        float conflictDepth = work.orbiting
+        float conflictDepth = work.orbiting || work.coolingDown
             ? 0.0f
             : labelConflictDepth(workIndex, work.x, work.y);
         size_t searchOffset = collisionIndex >= collisionSearchStart
@@ -1011,6 +1116,7 @@ void LabelLayout::solve(
                 float clampDistance = 0.0f;
                 positionAtDirection(
                     input,
+                    bounds,
                     directionX,
                     directionY,
                     candidateX,
@@ -1074,13 +1180,30 @@ void LabelLayout::solve(
             if (bestScore + requiredImprovement < currentScore) {
                 work.state->orbitTargetAngle = bestTargetAngle;
                 work.state->orbitTargetActive = true;
+                work.state->orbitAngleValid = true;
                 work.state->orbitDirection = bestDirection;
                 work.state->orbitLockUntilMs = nowMs + kOrbitDirectionLockMs;
+                work.state->orbitCooldownUntilMs = 0;
                 advanceOrbitTarget(workIndex);
             }
         }
-        if ((work.state->visible || input.mustShow) && !work.orbiting) {
+        if (work.state->visible || input.mustShow) {
             reserved[workIndex] = true;
+            if (work.state->orbitAngleValid) {
+                float clampDistance = 0.0f;
+                positionAtDirection(
+                    input,
+                    bounds,
+                    cosf(work.state->orbitTargetAngle),
+                    sinf(work.state->orbitTargetAngle),
+                    reservedX[workIndex],
+                    reservedY[workIndex],
+                    clampDistance
+                );
+            } else {
+                reservedX[workIndex] = work.x;
+                reservedY[workIndex] = work.y;
+            }
         }
     }
 
@@ -1150,7 +1273,11 @@ void LabelLayout::solve(
                 other.input->height
             );
             if (overlap > maxOverlap) maxOverlap = overlap;
-            if (overlap > 0.5f && !work.orbiting && !other.orbiting) {
+            if (overlap > 0.5f &&
+                !work.orbiting &&
+                !other.orbiting &&
+                !work.coolingDown &&
+                !other.coolingDown) {
                 conflict = true;
             }
         }
