@@ -13,6 +13,7 @@
 
 #include "aircraft_icons.h"
 #include "app_log.h"
+#include "app_watchdog.h"
 #include "airport_catalog.h"
 #include "label_layout.h"
 #include "map_background.h"
@@ -1500,6 +1501,9 @@ static void handleScreenshot() {
             row[x * 3 + 2] = expand5((px >> 11) & 0x1F);
         }
         client.write(row, rowBytes);
+        if ((y & 0x0F) == 0) {
+            AppWatchdog::feed();
+        }
         delay(1);
     }
 }
@@ -3543,8 +3547,10 @@ static bool shouldDrawRadarFrame(uint32_t now) {
 
 static void networkTaskMain(void *) {
     RADAR_LOGD("[task] network start core=%d\n", xPortGetCoreID());
+    AppWatchdog::subscribeCurrentTask("plane-net");
 
     while (true) {
+        AppWatchdog::feed();
         uint32_t now = millis();
         serviceWifiReconnect(now);
         if (WiFi.status() == WL_CONNECTED) {
@@ -3563,6 +3569,7 @@ static void networkTaskMain(void *) {
             serviceRouteLookup();
         }
 
+        AppWatchdog::feed();
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
@@ -3676,6 +3683,7 @@ void setup() {
         delay(20);
     }
     delay(250);
+    AppWatchdog::logResetReason();
     stateMutex = xSemaphoreCreateMutexStatic(&stateMutexStorage);
     if (stateMutex == nullptr) {
         RADAR_LOGE("[task] state mutex create failed\n");
@@ -3850,6 +3858,8 @@ void setup() {
     benchmarkAircraftLabelLayout();
 #endif
     bootScreenActive = false;
+    AppWatchdog::begin();
+    AppWatchdog::subscribeCurrentTask("loop");
     startNetworkTask();
     if (setupMode || portalActive) {
         logStep("setup portal active");
@@ -3860,9 +3870,11 @@ void setup() {
     logStep("drawRadar begin");
     drawRadar();
     logStep("drawRadar end");
+    AppWatchdog::feed();
 }
 
 void loop() {
+    AppWatchdog::feed();
     server.handleClient();
     handleTouch();
 
