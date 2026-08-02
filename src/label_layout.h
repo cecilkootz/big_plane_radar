@@ -84,12 +84,14 @@ private:
         float anchorY = 0;
         float width = 0;
         float height = 0;
+        float orbitTargetAngle = 0;
         uint32_t orbitLockUntilMs = 0;
         uint8_t conflictFrames = 0;
         uint8_t cleanFrames = 0;
         int8_t orbitDirection = 0;
         bool occupied = false;
         bool visible = true;
+        bool orbitTargetActive = false;
     };
 
     struct WorkItem {
@@ -109,6 +111,7 @@ private:
         float rightX = 1;
         float rightY = 0;
         bool isNew = false;
+        bool orbiting = false;
     };
 
     State states_[kMaxLabels];

@@ -99,6 +99,16 @@ static bool insideForwardCone(
     return (dx * forwardX + dy * forwardY) / distance >= 0.76604444f;
 }
 
+static float labelAngle(
+    const LabelLayoutInput &input,
+    const LabelLayoutOutput &output
+) {
+    return atan2f(
+        output.y + input.height * 0.5f - input.anchorY,
+        output.x + input.width * 0.5f - input.anchorX
+    );
+}
+
 static void testSingleAircraftAndCourseCone() {
     LabelLayout layout;
     layout.reset();
@@ -311,6 +321,51 @@ static void testCrossingLabelsKeepOrbitDirection() {
     CHECK(fabsf(yieldingRelativeY) > 4.0f);
 }
 
+static void testFullCircleOrbitKeepsAStableRadius() {
+    LabelLayout layout;
+    layout.reset();
+    LabelLayoutInput inputs[2] = {
+        makeInput(10, 260, 240),
+        makeInput(20, 340, 240),
+    };
+    inputs[0].courseValid = false;
+    inputs[1].courseValid = false;
+    LabelLayoutOutput outputs[2];
+    layout.solve(
+        inputs, 2, nullptr, 0, nullptr, 0, kBounds,
+        1000, 1, 0.033f, outputs
+    );
+
+    inputs[1].anchorX = 260;
+    LabelRectObstacle nearSideBlocker{248, 120, 220, 240};
+    layout.solve(
+        inputs, 2, nullptr, 0, &nearSideBlocker, 1, kBounds,
+        1033, 1, 0.033f, outputs
+    );
+
+    float minimumGap = 1000.0f;
+    float maximumGap = -1000.0f;
+    bool stayedVisible = outputs[1].visible;
+    for (uint32_t frame = 2; frame <= 180; frame++) {
+        layout.solve(
+            inputs, 2, nullptr, 0, nullptr, 0, kBounds,
+            1000 + frame * 33, 1, 0.033f, outputs
+        );
+        float gap = labelGapFromSymbol(inputs[1], outputs[1]);
+        minimumGap = fminf(minimumGap, gap);
+        maximumGap = fmaxf(maximumGap, gap);
+        stayedVisible = stayedVisible && outputs[1].visible;
+    }
+
+    float finalAngleDegrees = fabsf(labelAngle(inputs[1], outputs[1])) /
+        0.01745329251994329577f;
+    CHECK(finalAngleDegrees > 150.0f);
+    CHECK(minimumGap >= 1.8f);
+    CHECK(maximumGap <= 5.0f);
+    CHECK(maximumGap - minimumGap <= 2.0f);
+    CHECK(stayedVisible);
+}
+
 static void runDenseScene(size_t count) {
     LabelLayout layout;
     layout.reset();
@@ -366,6 +421,7 @@ int main() {
     testAnchorMovementAndTemporaryDisappearance();
     testOrbitSearchKeepsBlockedLabelClose();
     testCrossingLabelsKeepOrbitDirection();
+    testFullCircleOrbitKeepsAStableRadius();
     testDenseSceneAndMandatoryLabels();
     testNoHeapAllocationDuringSolve();
     puts("label_layout tests passed");
