@@ -444,6 +444,55 @@ static void testConvergingLabelsReserveDifferentDestinations() {
     CHECK(stayedVisible);
 }
 
+static void testRadialBlockerDoesNotPumpTheLabel() {
+    LabelLayout layout;
+    layout.reset();
+    LabelLayoutInput input = makeInput(0xabc777, 260, 240);
+    input.courseValid = false;
+    LabelLayoutOutput output;
+    layout.solve(
+        &input, 1, nullptr, 0, nullptr, 0, kBounds,
+        1000, 1, 0.033f, &output
+    );
+
+    LabelRectObstacle blocker{286, 180, 10, 120};
+    float previousGap = labelGapFromSymbol(input, output);
+    int radialDirection = 0;
+    size_t radialDirectionChanges = 0;
+    for (uint32_t frame = 1; frame <= 180; frame++) {
+        layout.solve(
+            &input, 1, nullptr, 0, &blocker, 1, kBounds,
+            1000 + frame * 33, 1, 0.033f, &output
+        );
+        float gap = labelGapFromSymbol(input, output);
+        float delta = gap - previousGap;
+        if (frame > 10 && fabsf(delta) > 0.1f) {
+            int direction = delta > 0.0f ? 1 : -1;
+            if (radialDirection != 0 && direction != radialDirection) {
+                radialDirectionChanges++;
+            }
+            radialDirection = direction;
+        }
+        previousGap = gap;
+    }
+
+    CHECK(radialDirectionChanges <= 1);
+    CHECK(previousGap > 5.0f);
+
+    float previousReturnGap = previousGap;
+    for (uint32_t frame = 181; frame <= 360; frame++) {
+        layout.solve(
+            &input, 1, nullptr, 0, nullptr, 0, kBounds,
+            1000 + frame * 33, 1, 0.033f, &output
+        );
+        float gap = labelGapFromSymbol(input, output);
+        CHECK(gap <= previousReturnGap + 0.1f);
+        previousReturnGap = gap;
+    }
+    CHECK(previousReturnGap <= 4.2f);
+    CHECK(output.visible);
+}
+
 static void runDenseScene(size_t count) {
     LabelLayout layout;
     layout.reset();
@@ -501,6 +550,7 @@ int main() {
     testCrossingLabelsKeepOrbitDirection();
     testFullCircleOrbitKeepsAStableRadius();
     testConvergingLabelsReserveDifferentDestinations();
+    testRadialBlockerDoesNotPumpTheLabel();
     testDenseSceneAndMandatoryLabels();
     testNoHeapAllocationDuringSolve();
     puts("label_layout tests passed");

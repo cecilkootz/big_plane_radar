@@ -23,6 +23,8 @@ static constexpr size_t kOrbitLabelsPerFrame = 16;
 static constexpr float kLabelCollisionMarginPx = 2.5f;
 static constexpr uint32_t kOrbitDirectionLockMs = 700;
 static constexpr uint32_t kOrbitCooldownMs = 1500;
+static constexpr uint32_t kOrbitGapCompactDelayMs = 1000;
+static constexpr float kOrbitGapReturnPxPerSecond = 8.0f;
 static constexpr size_t kCollisionSearchesPerFrame = 8;
 static constexpr uint8_t kHideAfterConflictFrames = 6;
 static constexpr uint8_t kShowAfterCleanFrames = 20;
@@ -134,13 +136,14 @@ static void positionAtDirection(
     const LabelLayoutBounds &bounds,
     float directionX,
     float directionY,
+    float symbolGap,
     float &x,
     float &y,
     float &clampDistance
 ) {
     float halfWidth = input.width * 0.5f;
     float halfHeight = input.height * 0.5f;
-    float targetDistance = input.symbolRadius + kPreferredSymbolGapPx;
+    float targetDistance = input.symbolRadius + symbolGap;
     float low = 0.0f;
     float high = targetDistance +
         sqrtf(halfWidth * halfWidth + halfHeight * halfHeight) + 2.0f;
@@ -169,6 +172,25 @@ static void positionAtDirection(
     float unclampedY = y;
     clampToBounds(x, y, input.width, input.height, bounds);
     clampDistance = fabsf(x - unclampedX) + fabsf(y - unclampedY);
+}
+
+static float symbolGapAtPosition(
+    const LabelLayoutInput &input,
+    float x,
+    float y
+) {
+    float distanceSquared = pointToRectDistanceSquared(
+        input.anchorX,
+        input.anchorY,
+        x,
+        y,
+        input.width,
+        input.height
+    );
+    return maxFloat(
+        kPreferredSymbolGapPx,
+        sqrtf(distanceSquared) - input.symbolRadius
+    );
 }
 
 static void courseVectors(
@@ -354,9 +376,11 @@ void LabelLayout::solve(
             hasNewLabel = true;
             state.orbitTargetActive = false;
             state.orbitTargetAngle = 0.0f;
+            state.orbitTargetGap = kPreferredSymbolGapPx;
             state.orbitDirection = 0;
             state.orbitLockUntilMs = 0;
             state.orbitCooldownUntilMs = 0;
+            state.orbitGapCompactAfterMs = 0;
             state.orbitAngleValid = false;
 
             const float directions[8][2] = {
@@ -473,6 +497,7 @@ void LabelLayout::solve(
             float radialX = work.x + input.width * 0.5f - input.anchorX;
             float radialY = work.y + input.height * 0.5f - input.anchorY;
             state.orbitTargetAngle = atan2f(radialY, radialX);
+            state.orbitTargetGap = symbolGapAtPosition(input, work.x, work.y);
             state.orbitAngleValid = true;
         }
 
@@ -537,11 +562,38 @@ void LabelLayout::solve(
         float targetX = 0.0f;
         float targetY = 0.0f;
         float clampDistance = 0.0f;
+        bool canCompact = !state.orbitTargetActive &&
+            !deadlineActive(nowMs, state.orbitCooldownUntilMs) &&
+            !deadlineActive(nowMs, state.orbitGapCompactAfterMs) &&
+            state.orbitTargetGap > kPreferredSymbolGapPx;
+        if (canCompact) {
+            float preferredX = 0.0f;
+            float preferredY = 0.0f;
+            positionAtDirection(
+                *work.input,
+                bounds,
+                cosf(state.orbitTargetAngle),
+                sinf(state.orbitTargetAngle),
+                kPreferredSymbolGapPx,
+                preferredX,
+                preferredY,
+                clampDistance
+            );
+            if (!placementHasHardConflict(work, preferredX, preferredY)) {
+                float compactDelta = kOrbitGapReturnPxPerSecond *
+                    clampFloat(deltaSeconds, 0.0f, 0.1f);
+                state.orbitTargetGap = maxFloat(
+                    kPreferredSymbolGapPx,
+                    state.orbitTargetGap - compactDelta
+                );
+            }
+        }
         positionAtDirection(
             *work.input,
             bounds,
             cosf(state.orbitTargetAngle),
             sinf(state.orbitTargetAngle),
+            state.orbitTargetGap,
             targetX,
             targetY,
             clampDistance
@@ -550,6 +602,7 @@ void LabelLayout::solve(
             state.orbitTargetActive = false;
             state.orbitAngleValid = false;
             state.orbitCooldownUntilMs = 0;
+            state.orbitGapCompactAfterMs = 0;
         }
     }
 
@@ -1018,6 +1071,7 @@ void LabelLayout::solve(
             bounds,
             cosf(nextAngle),
             sinf(nextAngle),
+            state.orbitTargetGap,
             candidateX,
             candidateY,
             clampDistance
@@ -1031,6 +1085,7 @@ void LabelLayout::solve(
             bounds,
             cosf(state.orbitTargetAngle),
             sinf(state.orbitTargetAngle),
+            state.orbitTargetGap,
             targetX,
             targetY,
             clampDistance
@@ -1065,8 +1120,33 @@ void LabelLayout::solve(
             !placementHasHardConflict(work, work.x, work.y)) {
             float radialX = work.x + input.width * 0.5f - input.anchorX;
             float radialY = work.y + input.height * 0.5f - input.anchorY;
-            work.state->orbitTargetAngle = atan2f(radialY, radialX);
-            work.state->orbitAngleValid = true;
+            float settledAngle = atan2f(radialY, radialX);
+            float maxGap = input.mustShow ? kPriorityMaxGapPx : kNormalMaxGapPx;
+            float settledGap = clampFloat(
+                symbolGapAtPosition(input, work.x, work.y),
+                kPreferredSymbolGapPx,
+                maxGap
+            );
+            float settledX = 0.0f;
+            float settledY = 0.0f;
+            float clampDistance = 0.0f;
+            positionAtDirection(
+                input,
+                bounds,
+                cosf(settledAngle),
+                sinf(settledAngle),
+                settledGap,
+                settledX,
+                settledY,
+                clampDistance
+            );
+            if (!placementHasHardConflict(work, settledX, settledY)) {
+                work.state->orbitTargetAngle = settledAngle;
+                work.state->orbitTargetGap = settledGap;
+                work.state->orbitGapCompactAfterMs =
+                    nowMs + kOrbitGapCompactDelayMs;
+                work.state->orbitAngleValid = true;
+            }
         }
         advanceOrbitTarget(workIndex);
         float conflictDepth = work.orbiting || work.coolingDown
@@ -1119,6 +1199,7 @@ void LabelLayout::solve(
                     bounds,
                     directionX,
                     directionY,
+                    kPreferredSymbolGapPx,
                     candidateX,
                     candidateY,
                     clampDistance
@@ -1179,11 +1260,13 @@ void LabelLayout::solve(
             float requiredImprovement = maxFloat(4.0f, currentScore * 0.08f);
             if (bestScore + requiredImprovement < currentScore) {
                 work.state->orbitTargetAngle = bestTargetAngle;
+                work.state->orbitTargetGap = kPreferredSymbolGapPx;
                 work.state->orbitTargetActive = true;
                 work.state->orbitAngleValid = true;
                 work.state->orbitDirection = bestDirection;
                 work.state->orbitLockUntilMs = nowMs + kOrbitDirectionLockMs;
                 work.state->orbitCooldownUntilMs = 0;
+                work.state->orbitGapCompactAfterMs = 0;
                 advanceOrbitTarget(workIndex);
             }
         }
@@ -1196,6 +1279,7 @@ void LabelLayout::solve(
                     bounds,
                     cosf(work.state->orbitTargetAngle),
                     sinf(work.state->orbitTargetAngle),
+                    work.state->orbitTargetGap,
                     reservedX[workIndex],
                     reservedY[workIndex],
                     clampDistance

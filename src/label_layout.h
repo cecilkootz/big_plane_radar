@@ -85,8 +85,10 @@ private:
         float width = 0;
         float height = 0;
         float orbitTargetAngle = 0;
+        float orbitTargetGap = 0;
         uint32_t orbitLockUntilMs = 0;
         uint32_t orbitCooldownUntilMs = 0;
+        uint32_t orbitGapCompactAfterMs = 0;
         uint8_t conflictFrames = 0;
         uint8_t cleanFrames = 0;
         int8_t orbitDirection = 0;
