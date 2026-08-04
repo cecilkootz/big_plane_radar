@@ -64,7 +64,9 @@ setup Wi-Fi:
 2. Open the [Stadia Maps client dashboard](https://client.stadiamaps.com/).
 3. Open **Manage Properties**, find **Authentication Configuration**, and
    generate an API key.
-4. Keep the key available for the next step. Do not publish it in screenshots
+4. The firmware uses standard raster basemap tiles, which are available on the
+   Stadia Maps Free plan. A paid Static Maps subscription is not required.
+5. Keep the key available for the next step. Do not publish it in screenshots
    or commits.
 
 ### 4. Configure the radar
@@ -89,10 +91,10 @@ enter coordinates manually. You can change them later from
 `http://plane-radar.local` after both devices are connected to your normal
 Wi-Fi.
 
-The first map-enabled boot downloads four map images. Keep the device powered
-and wait for `TILE CACHE` to finish tile `4/4`; the radar opens automatically
-afterwards. The boot log shows each tile's range, zoom, dimensions, PNG size,
-download progress, and decode time.
+The first map-enabled boot downloads the XYZ tiles needed for four map views.
+Keep the device powered and wait for `TILE CACHE` to finish view `4/4`; the
+radar opens automatically afterwards. The boot log shows the view, XYZ tile,
+zoom, dimensions, PNG size, download progress, and decode time.
 
 ### Everyday controls
 
@@ -159,8 +161,8 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
   remains temporary and is never committed to history;
 - optional route city line populated dynamically from cached callsign lookups at
   `https://api.adsbdb.com/`; no global city table is embedded in the firmware;
-- optional Stadia Maps `Alidade Smooth Dark` raster background, with a complete
-  no-map fallback;
+- optional Stadia Maps `Alidade Smooth Dark` raster-tile background using the
+  Free plan, with a complete no-map fallback;
 - configurable map brightness from 20% to 100%;
 - all four map ranges are downloaded once during boot and cached in PSRAM, so
   changing radar range performs no additional Stadia request;
@@ -322,11 +324,12 @@ Do not commit API keys. Public builds should keep the default
 device setup page and are stored in NVS. If the key is empty or a map request
 fails, the radar continues on its normal plain background.
 
-When Stadia is enabled, boot downloads one image for each of the four range
-presets. The images remain in PSRAM until restart. They are refreshed only on
-the next boot, including after changing the radar coordinates in setup. The
-boot log reports tile progress as `1/4` through `4/4`; it shows `SKIP` when maps
-are disabled and `NO KEY` when Stadia is selected without a key.
+When Stadia is enabled, boot downloads and assembles the 256x256 XYZ tiles
+needed for each of the four range presets. The rendered views remain in PSRAM
+until restart. They are refreshed only on the next boot, including after
+changing the radar coordinates in setup. The boot log reports both view and
+XYZ-tile progress; it shows `SKIP` when maps are disabled and `NO KEY` when
+Stadia is selected without a key.
 
 ### Upload over USB
 
@@ -390,10 +393,11 @@ setup page is served over local HTTP. The button therefore opens the repository'
 hosted HTTPS `location.html` helper and returns the coordinates to the local
 setup page.
 
-The firmware uses the Stadia Maps Static Maps API and preserves the attribution
-rendered into the returned map image. See the official
+The firmware uses Stadia Maps raster XYZ tiles available on the Free plan. It
+assembles and bilinearly scales the tiles on the ESP32, and draws the required
+Stadia Maps, OpenMapTiles, and OpenStreetMap attribution over the map. See the official
 [API-key instructions](https://docs.stadiamaps.com/authentication/) and
-[Static Maps documentation](https://docs.stadiamaps.com/static-maps/).
+[Raster Map Tiles documentation](https://docs.stadiamaps.com/raster/).
 
 ## Screenshot
 

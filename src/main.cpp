@@ -933,18 +933,22 @@ static void updateMapBootProgress(
     snprintf(
         tileLine,
         sizeof(tileLine),
-        "TILE %u/%u / RANGE %s",
+        "VIEW %u/%u / RANGE %s / XYZ %u/%u",
         static_cast<unsigned>(progress.viewIndex + 1),
         static_cast<unsigned>(context->tileCount),
-        context->range != nullptr ? context->range : "?"
+        context->range != nullptr ? context->range : "?",
+        static_cast<unsigned>(std::min(progress.tileIndex + 1, progress.tileCount)),
+        static_cast<unsigned>(progress.tileCount)
     );
     snprintf(
         geometryLine,
         sizeof(geometryLine),
-        "SOURCE %dX%d / ZOOM %d",
+        "ZOOM %d / GRID %dX%d / SOURCE %dX%d",
+        progress.zoom,
+        progress.tileColumns,
+        progress.tileRows,
         progress.sourceWidth,
-        progress.sourceHeight,
-        progress.zoom
+        progress.sourceHeight
     );
     snprintf(
         targetLine,
@@ -956,10 +960,25 @@ static void updateMapBootProgress(
 
     switch (progress.phase) {
     case RadarMap::LoadPhase::Request:
-        strlcpy(activityLine, "REQUESTING STADIA STATIC MAP", sizeof(activityLine));
+        snprintf(
+            activityLine,
+            sizeof(activityLine),
+            "REQUEST XYZ / %d/%d/%d.PNG",
+            progress.zoom,
+            progress.tileX,
+            progress.tileY
+        );
         break;
     case RadarMap::LoadPhase::Response:
-        snprintf(activityLine, sizeof(activityLine), "HTTP %d / READING HEADERS", progress.httpStatus);
+        snprintf(
+            activityLine,
+            sizeof(activityLine),
+            "HTTP %d / XYZ %d/%d/%d",
+            progress.httpStatus,
+            progress.zoom,
+            progress.tileX,
+            progress.tileY
+        );
         break;
     case RadarMap::LoadPhase::Download: {
         char received[20];
@@ -972,10 +991,11 @@ static void updateMapBootProgress(
         snprintf(
             activityLine,
             sizeof(activityLine),
-            "DOWNLOAD %s/%s / %uPCT",
+            "DOWNLOAD %s/%s / %uPCT / VIEW %uKB",
             received,
             total,
-            percent
+            percent,
+            static_cast<unsigned>(progress.viewReceivedBytes / 1024)
         );
         break;
     }
@@ -986,13 +1006,14 @@ static void updateMapBootProgress(
         break;
     }
     case RadarMap::LoadPhase::Ready: {
-        char pngSize[20];
-        formatBootByteCount(progress.totalBytes, pngSize, sizeof(pngSize));
+        char viewSize[20];
+        formatBootByteCount(progress.viewReceivedBytes, viewSize, sizeof(viewSize));
         snprintf(
             activityLine,
             sizeof(activityLine),
-            "READY / %s / DECODE %lums",
-            pngSize,
+            "READY / %u XYZ / %s / DECODE %lums",
+            static_cast<unsigned>(progress.tileCount),
+            viewSize,
             static_cast<unsigned long>(progress.decodeMs)
         );
         break;
@@ -1087,14 +1108,14 @@ static bool preloadMapCache() {
         snprintf(
             failedLine,
             sizeof(failedLine),
-            "FAILED %u OF %u TILES",
+            "FAILED %u OF %u VIEWS",
             static_cast<unsigned>(progressContext.failureCount),
             static_cast<unsigned>(RANGE_COUNT)
         );
         snprintf(
             tileLine,
             sizeof(tileLine),
-            "LAST FAILURE TILE %u/%u / HTTP %d",
+            "LAST FAILURE VIEW %u/%u / HTTP %d",
             static_cast<unsigned>(progressContext.lastFailureTile + 1),
             static_cast<unsigned>(RANGE_COUNT),
             progressContext.lastHttpStatus
@@ -3215,6 +3236,31 @@ static void drawAircraftList(
     }
 }
 
+static void drawMapAttribution(PanelDisplay::Canvas &g) {
+    char firstLine[40];
+    char secondLine[24];
+    snprintf(
+        firstLine,
+        sizeof(firstLine),
+        "%c STADIA MAPS / %c OPENMAPTILES",
+        PanelDisplay::GLYPH_COPYRIGHT,
+        PanelDisplay::GLYPH_COPYRIGHT
+    );
+    snprintf(
+        secondLine,
+        sizeof(secondLine),
+        "%c OPENSTREETMAP",
+        PanelDisplay::GLYPH_COPYRIGHT
+    );
+
+    g.fillRect(2, SCREEN_H - 23, 186, 21, colorBg);
+    g.setTextDatum(textdatum_t::top_left);
+    g.setTextSize(1);
+    g.setTextColor(colorDim, colorBg);
+    g.drawString(firstLine, 4, SCREEN_H - 21);
+    g.drawString(secondLine, 4, SCREEN_H - 12);
+}
+
 static void drawRadar() {
     static uint32_t drawCounter = 0;
     drawCounter++;
@@ -3399,6 +3445,10 @@ static void drawRadar() {
     };
     drawLabelPass(false);
     drawLabelPass(true);
+
+    if (mapVisible) {
+        drawMapAttribution(g);
+    }
 
     if (logDraw) {
         RADAR_LOGD(

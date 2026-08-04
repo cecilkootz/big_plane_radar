@@ -23,9 +23,16 @@ struct LoadProgress {
     int sourceHeight = 0;
     int destinationWidth = 0;
     int destinationHeight = 0;
+    size_t tileIndex = 0;
+    size_t tileCount = 0;
+    int tileColumns = 0;
+    int tileRows = 0;
+    int tileX = 0;
+    int tileY = 0;
     int httpStatus = 0;
     size_t receivedBytes = 0;
     size_t totalBytes = 0;
+    size_t viewReceivedBytes = 0;
     uint32_t decodeMs = 0;
     const char *error = nullptr;
 };
