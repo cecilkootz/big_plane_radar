@@ -89,7 +89,6 @@ static constexpr uint32_t ROUTE_CACHE_STALE_MS = 60000;
 static constexpr uint32_t ROUTE_HTTP_TIMEOUT_MS = 2500;
 static constexpr uint32_t BOOT_SETUP_WINDOW_MS = 4000;
 static constexpr uint32_t TOUCH_LONG_PRESS_MS = 1200;
-static constexpr uint32_t TOUCH_TAP_MIN_MS = 50;
 static constexpr int TOUCH_TAP_MOVE_MAX_PX = 18;
 static constexpr uint32_t CONFIG_HOLD_NOTICE_MS = 900;
 static constexpr uint32_t TRACK_STALE_MS = 60000;
@@ -3564,7 +3563,6 @@ static void handleTouch() {
         int movedX = abs(static_cast<int>(touchLastX) - touchDownX);
         int movedY = abs(static_cast<int>(touchLastY) - touchDownY);
         bool tap = !longPressHandled &&
-            held >= TOUCH_TAP_MIN_MS &&
             held < TOUCH_LONG_PRESS_MS &&
             movedX <= TOUCH_TAP_MOVE_MAX_PX &&
             movedY <= TOUCH_TAP_MOVE_MAX_PX;
