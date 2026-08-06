@@ -4,6 +4,7 @@ build/
 *.pyc
 __pycache__/
 .serena/
+docs/future_ideas/
 
 # Keep release binaries explicit.
 !releases/
