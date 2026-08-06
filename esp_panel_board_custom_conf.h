@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include "src/display_tuning.h"
+
 // *INDENT-OFF*
 #define ESP_OPEN_TOUCH 1 // 1 initiates the touch, 0 closes the touch.
 
@@ -81,7 +83,7 @@
     #define ESP_PANEL_BOARD_LCD_RGB_USE_CONTROL_PANEL       (0) // 0/1. Typically set to 1
 
     /* For refresh panel (RGB) */
-    #define ESP_PANEL_BOARD_LCD_RGB_CLK_HZ          (13 * 1000 * 1000)
+    #define ESP_PANEL_BOARD_LCD_RGB_CLK_HZ          (PLANE_RADAR_RGB_PCLK_HZ)
                                                             // To increase the upper limit of the PCLK, see: https://docs.espressif.com/projects/esp-faq/en/latest/software-framework/peripherals/lcd.html#how-can-i-increase-the-upper-limit-of-pclk-settings-on-esp32-s3-while-ensuring-normal-rgb-screen-display
     #define ESP_PANEL_BOARD_LCD_RGB_HPW             (4)
     #define ESP_PANEL_BOARD_LCD_RGB_HBP             (8)
@@ -97,7 +99,7 @@
     #define ESP_PANEL_BOARD_LCD_RGB_PIXEL_BITS      (ESP_PANEL_LCD_COLOR_BITS_RGB565)   // | ESP_PANEL_LCD_COLOR_BITS_RGB565 | ESP_PANEL_LCD_COLOR_BITS_RGB888 |
                                                                                         // ┗---------------------------------┻---------------------------------┛
                                                             // To understand color format of RGB LCD, see: https://docs.espressif.com/projects/esp-iot-solution/en/latest/display/lcd/rgb_lcd.html#color-formats
-    #define ESP_PANEL_BOARD_LCD_RGB_BOUNCE_BUF_SIZE (ESP_PANEL_BOARD_WIDTH * 10)
+    #define ESP_PANEL_BOARD_LCD_RGB_BOUNCE_BUF_SIZE (ESP_PANEL_BOARD_WIDTH * PLANE_RADAR_RGB_BOUNCE_LINES)
                                                             // Bounce buffer size in bytes. It is used to avoid screen drift
                                                             // for ESP32-S3. Typically set to `ESP_PANEL_BOARD_WIDTH * 10`
                                                             // The size should satisfy `size * N = LCD_width * LCD_height`,

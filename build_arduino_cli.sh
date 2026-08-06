@@ -3,6 +3,8 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$PROJECT_DIR/.." && pwd)"
+ARDUINO_CLI_BIN="${ARDUINO_CLI_BIN:-arduino-cli}"
+ARDUINO_CLI_CONFIG_FILE="${ARDUINO_CLI_CONFIG_FILE:-}"
 
 if [[ -n "${WAVESHARE_LIB_DIR:-}" ]]; then
   :
@@ -27,6 +29,24 @@ DEFAULT_LON="${DEFAULT_LON:--0.127800}"
 DEFAULT_MAP_PROVIDER="${DEFAULT_MAP_PROVIDER:-none}"
 DEFAULT_STADIA_API_KEY="${DEFAULT_STADIA_API_KEY:-}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
+RGB_BOUNCE_LINES="${RGB_BOUNCE_LINES:-10}"
+REQUIRE_HIGH_PERF="${REQUIRE_HIGH_PERF:-0}"
+
+case "$RGB_BOUNCE_LINES" in
+  10|20) ;;
+  *)
+    echo "RGB_BOUNCE_LINES must be 10 or 20." >&2
+    exit 1
+    ;;
+esac
+
+case "$REQUIRE_HIGH_PERF" in
+  0|1) ;;
+  *)
+    echo "REQUIRE_HIGH_PERF must be 0 or 1." >&2
+    exit 1
+    ;;
+esac
 
 case "$LOG_LEVEL" in
   off|0)
@@ -72,6 +92,8 @@ c_define_string() {
 COMMON_FLAGS="-I$PROJECT_DIR -I$PROJECT_DIR/src -DPNG_MAX_BUFFERED_PIXELS=8322"
 CPP_FLAGS="$COMMON_FLAGS"
 CPP_FLAGS+=" -DPLANE_RADAR_LOG_LEVEL=$APP_LOG_LEVEL"
+CPP_FLAGS+=" -DPLANE_RADAR_RGB_BOUNCE_LINES=$RGB_BOUNCE_LINES"
+CPP_FLAGS+=" -DPLANE_RADAR_REQUIRE_HIGH_PERF=$REQUIRE_HIGH_PERF"
 CPP_FLAGS+=" -DDEFAULT_WIFI_SSID=$(c_define_string "$DEFAULT_WIFI_SSID")"
 CPP_FLAGS+=" -DDEFAULT_WIFI_PASSWORD=$(c_define_string "$DEFAULT_WIFI_PASSWORD")"
 CPP_FLAGS+=" -DDEFAULT_LAT=$DEFAULT_LAT"
@@ -91,6 +113,11 @@ args=(
   --build-property "compiler.c.extra_flags=$COMMON_FLAGS"
 )
 
+cli=("$ARDUINO_CLI_BIN")
+if [[ -n "$ARDUINO_CLI_CONFIG_FILE" ]]; then
+  cli+=(--config-file "$ARDUINO_CLI_CONFIG_FILE")
+fi
+
 if [[ "$CLEAN" == "1" ]]; then
   args+=(--clean)
 fi
@@ -101,4 +128,4 @@ fi
 
 args+=("$PROJECT_DIR")
 
-arduino-cli "${args[@]}"
+"${cli[@]}" "${args[@]}"

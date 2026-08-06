@@ -13,6 +13,7 @@
 
 #include "aircraft_icons.h"
 #include "app_log.h"
+#include "build_diagnostics.h"
 #include "app_watchdog.h"
 #include "airport_catalog.h"
 #include "label_layout.h"
@@ -3733,6 +3734,8 @@ void setup() {
         delay(20);
     }
     delay(250);
+    BuildDiagnostics::logBuildConfiguration();
+    BuildDiagnostics::logMemory("startup");
     AppWatchdog::logResetReason();
     stateMutex = xSemaphoreCreateMutexStatic(&stateMutexStorage);
     if (stateMutex == nullptr) {
@@ -3752,6 +3755,7 @@ void setup() {
             delay(1000);
         }
     }
+    BuildDiagnostics::logMemory("display-ready");
     logStep("display end");
     initAircraftTrackCache();
     resetBootScreen();
@@ -3880,6 +3884,7 @@ void setup() {
             );
             setBootStage(BOOT_SERVICES, BootStatus::Ok);
             preloadMapCache();
+            BuildDiagnostics::logMemory("map-cache-ready");
             setBootStage(BOOT_DATA, BootStatus::Running);
             bool dataOk = fetchAdsb();
             lastFetchMs = millis();
