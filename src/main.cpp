@@ -89,6 +89,7 @@ static constexpr uint32_t ROUTE_CACHE_STALE_MS = 60000;
 static constexpr uint32_t ROUTE_HTTP_TIMEOUT_MS = 2500;
 static constexpr uint32_t BOOT_SETUP_WINDOW_MS = 4000;
 static constexpr uint32_t TOUCH_LONG_PRESS_MS = 1200;
+static constexpr uint32_t TOUCH_RELEASE_DEBOUNCE_MS = 80;
 static constexpr int TOUCH_TAP_MOVE_MAX_PX = 18;
 static constexpr uint32_t CONFIG_HOLD_NOTICE_MS = 900;
 static constexpr uint32_t TRACK_STALE_MS = 60000;
@@ -251,6 +252,7 @@ static TaskHandle_t networkTaskHandle = nullptr;
 static volatile bool networkDataDirty = false;
 static bool touchWasDown = false;
 static uint32_t touchDownMs = 0;
+static uint32_t touchLastContactMs = 0;
 static uint16_t touchDownX = 0;
 static uint16_t touchDownY = 0;
 static uint16_t touchLastX = 0;
@@ -3536,8 +3538,13 @@ static bool handleAircraftListTap(uint16_t x, uint16_t y) {
 static void handleTouch() {
     uint16_t x = 0;
     uint16_t y = 0;
-    bool down = screen.readTouch(&x, &y);
     uint32_t now = millis();
+    bool rawDown = screen.readTouch(&x, &y);
+    if (rawDown) {
+        touchLastContactMs = now;
+    }
+    bool down = rawDown ||
+        (touchWasDown && now - touchLastContactMs < TOUCH_RELEASE_DEBOUNCE_MS);
     if (down && !touchWasDown) {
         touchDownMs = now;
         touchDownX = x;
@@ -3546,7 +3553,7 @@ static void handleTouch() {
         touchLastY = y;
         longPressHandled = false;
     }
-    if (down) {
+    if (rawDown) {
         touchLastX = x;
         touchLastY = y;
     }
