@@ -272,16 +272,26 @@ arduino-cli core install esp32:esp32
 
 ### Сборка
 
+Релизная прошивка собирается с закреплённым high-performance SDK Espressif для
+стабильной работы RGB-панели:
+
 ```sh
-bash build_arduino_cli.sh
+bash build_arduino_highperf.sh
 ```
+
+При первом запуске скрипт скачает и проверит Espressif SDK `3.2.0-h` размером
+около 343 МБ и установит отдельное окружение Arduino Core 3.2.0 в пользовательский
+кэш. Системный Arduino Core не заменяется. В сборке включены O2, XIP из PSRAM,
+cache line 64 байта и Octal PSRAM 80 МГц.
+
+Для разработки с системным Arduino Core используйте `bash build_arduino_cli.sh`.
 
 По умолчанию используется `LOG_LEVEL=info`: в Serial остаются только ошибки и
 важные однократные события. Для диагностики загрузки, сети, карты и времени
 отрисовки соберите debug-вариант:
 
 ```sh
-LOG_LEVEL=debug bash build_arduino_cli.sh
+LOG_LEVEL=debug bash build_arduino_highperf.sh
 ```
 
 Доступные уровни: `off`, `error`, `info` и `debug`. Отключённые логи приложения
@@ -301,7 +311,7 @@ Longitude: -0.127800
 ```sh
 DEFAULT_LAT=51.507400 \
 DEFAULT_LON=-0.127800 \
-bash build_arduino_cli.sh
+bash build_arduino_highperf.sh
 ```
 
 Опционально можно вшить Wi-Fi defaults:
@@ -309,7 +319,7 @@ bash build_arduino_cli.sh
 ```sh
 DEFAULT_WIFI_SSID="YourNetwork" \
 DEFAULT_WIFI_PASSWORD="YourPassword" \
-bash build_arduino_cli.sh
+bash build_arduino_highperf.sh
 ```
 
 По умолчанию подложка карты отключена. Для приватной сборки, в которой Stadia
@@ -318,7 +328,7 @@ bash build_arduino_cli.sh
 ```sh
 DEFAULT_MAP_PROVIDER=stadia \
 DEFAULT_STADIA_API_KEY="YourStadiaApiKey" \
-bash build_arduino_cli.sh
+bash build_arduino_highperf.sh
 ```
 
 Не коммитьте API-ключи. Публичные сборки должны сохранять значение по умолчанию
@@ -338,7 +348,7 @@ XYZ-тайла, `SKIP` при отключённой карте и `NO KEY`, е�
 затем выполните:
 
 ```sh
-UPLOAD=1 CLEAN=1 PORT=/dev/cu.usbmodem5AE71132621 bash build_arduino_cli.sh
+UPLOAD=1 CLEAN=1 PORT=/dev/cu.usbmodem5AE71132621 bash build_arduino_highperf.sh
 ```
 
 Замените `PORT` на свой:
@@ -434,4 +444,5 @@ esptool.py --chip esp32s3 --port /dev/cu.usbmodemXXXX --baud 921600 \
   write_flash 0x0 releases/big_plane_radar.ino.merged.bin
 ```
 
-Самый простой способ для разработки — `UPLOAD=1 ... bash build_arduino_cli.sh`.
+Рекомендуемый способ, совпадающий с релизной сборкой, —
+`UPLOAD=1 ... bash build_arduino_highperf.sh`.

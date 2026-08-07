@@ -270,16 +270,26 @@ arduino-cli core install esp32:esp32
 
 ### Build
 
+The release firmware uses Espressif's pinned high-performance SDK for stable RGB
+panel operation:
+
 ```sh
-bash build_arduino_cli.sh
+bash build_arduino_highperf.sh
 ```
+
+The first run downloads and verifies the Espressif `3.2.0-h` SDK (about 343 MB)
+and installs an isolated Arduino Core 3.2.0 environment under the user cache. It
+does not replace the system Arduino Core. The build enables O2, PSRAM XIP, a
+64-byte cache line, and 80 MHz Octal PSRAM.
+
+For development with the system Arduino Core, use `bash build_arduino_cli.sh`.
 
 The default `LOG_LEVEL=info` keeps only errors and important one-time events in
 Serial. Use a debug build when diagnosing boot, networking, map loading, or frame
 timing:
 
 ```sh
-LOG_LEVEL=debug bash build_arduino_cli.sh
+LOG_LEVEL=debug bash build_arduino_highperf.sh
 ```
 
 Supported levels are `off`, `error`, `info`, and `debug`. Disabled application
@@ -299,7 +309,7 @@ You can override first-boot defaults at build time:
 ```sh
 DEFAULT_LAT=51.507400 \
 DEFAULT_LON=-0.127800 \
-bash build_arduino_cli.sh
+bash build_arduino_highperf.sh
 ```
 
 Optional Wi-Fi defaults:
@@ -307,7 +317,7 @@ Optional Wi-Fi defaults:
 ```sh
 DEFAULT_WIFI_SSID="YourNetwork" \
 DEFAULT_WIFI_PASSWORD="YourPassword" \
-bash build_arduino_cli.sh
+bash build_arduino_highperf.sh
 ```
 
 The map background is disabled by default. To make Stadia the first-boot
@@ -316,7 +326,7 @@ default for a private build:
 ```sh
 DEFAULT_MAP_PROVIDER=stadia \
 DEFAULT_STADIA_API_KEY="YourStadiaApiKey" \
-bash build_arduino_cli.sh
+bash build_arduino_highperf.sh
 ```
 
 Do not commit API keys. Public builds should keep the default
@@ -336,7 +346,7 @@ Stadia is selected without a key.
 Put the board switch into `UART1`, plug USB into the `UART1` port, then run:
 
 ```sh
-UPLOAD=1 CLEAN=1 PORT=/dev/cu.usbmodem5AE71132621 bash build_arduino_cli.sh
+UPLOAD=1 CLEAN=1 PORT=/dev/cu.usbmodem5AE71132621 bash build_arduino_highperf.sh
 ```
 
 Adjust `PORT` for your machine:
@@ -433,4 +443,5 @@ esptool.py --chip esp32s3 --port /dev/cu.usbmodemXXXX --baud 921600 \
   write_flash 0x0 releases/big_plane_radar.ino.merged.bin
 ```
 
-The easiest development path is still `UPLOAD=1 ... bash build_arduino_cli.sh`.
+The recommended release-equivalent path is
+`UPLOAD=1 ... bash build_arduino_highperf.sh`.

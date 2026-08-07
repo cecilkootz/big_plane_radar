@@ -1,7 +1,8 @@
 # Release Artifacts
 
-This directory is populated by local builds. Use `bash build_arduino_cli.sh` for
-normal builds or `UPLOAD=1 bash build_arduino_cli.sh` for direct flashing.
+This directory is populated by local builds. Use `bash build_arduino_highperf.sh`
+for release-equivalent builds or `UPLOAD=1 bash build_arduino_highperf.sh` for
+direct flashing.
 
 The expected release files are:
 
