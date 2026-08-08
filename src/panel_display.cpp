@@ -1,13 +1,16 @@
 #include "panel_display.h"
 #include "app_log.h"
+#include "display_tuning.h"
 
 #include <algorithm>
 #include <ctype.h>
 #include <cstring>
+#include <driver/i2c.h>
 #include <esp_display_panel.hpp>
 #include <esp_heap_caps.h>
 #include <math.h>
 #include <pgmspace.h>
+#include <board/esp_panel_board_default_config.hpp>
 
 using namespace esp_panel::board;
 using namespace esp_panel::drivers;
@@ -20,6 +23,7 @@ static Touch *touch = nullptr;
 static uint32_t presentCounter = 0;
 static StaticSemaphore_t refreshFinishedSemaphoreStorage;
 static SemaphoreHandle_t refreshFinishedSemaphore = nullptr;
+static uint8_t lcd7bOutputState = 0xFF;
 
 Canvas screen;
 
@@ -46,6 +50,199 @@ static constexpr int MEDIUM_FONT_H = 11;
 static constexpr int MEDIUM_FONT_ADVANCE = 10;
 static constexpr uint8_t MEDIUM_COLUMN_WIDTHS[FONT_W] = {2, 1, 2, 1, 2};
 static constexpr uint8_t MEDIUM_ROW_HEIGHTS[FONT_H] = {2, 1, 2, 1, 2, 1, 2};
+
+static bool beginProbeI2c() {
+    i2c_config_t config = {};
+    config.mode = I2C_MODE_MASTER;
+    config.sda_io_num = static_cast<gpio_num_t>(8);
+    config.scl_io_num = static_cast<gpio_num_t>(9);
+    config.sda_pullup_en = GPIO_PULLUP_ENABLE;
+    config.scl_pullup_en = GPIO_PULLUP_ENABLE;
+    config.master.clk_speed = 400000;
+    config.clk_flags = 0;
+    return i2c_param_config(I2C_NUM_0, &config) == ESP_OK &&
+           i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0) == ESP_OK;
+}
+
+static bool readI2cRegister16(uint8_t address, uint16_t reg, uint8_t *data, size_t size) {
+    uint8_t command[2] = {
+        static_cast<uint8_t>(reg >> 8),
+        static_cast<uint8_t>(reg),
+    };
+    return i2c_master_write_read_device(
+        I2C_NUM_0,
+        address,
+        command,
+        sizeof(command),
+        data,
+        size,
+        pdMS_TO_TICKS(100)
+    ) == ESP_OK;
+}
+
+static bool readI2cRegister8(uint8_t address, uint8_t reg, uint8_t &value) {
+    return i2c_master_write_read_device(
+        I2C_NUM_0,
+        address,
+        &reg,
+        sizeof(reg),
+        &value,
+        sizeof(value),
+        pdMS_TO_TICKS(100)
+    ) == ESP_OK;
+}
+
+static bool has7BControllerSignature() {
+    uint8_t id0 = 0;
+    uint8_t id1 = 0;
+    uint8_t mode = 0;
+    return readI2cRegister8(0x24, 0x00, id0) &&
+           readI2cRegister8(0x24, 0x01, id1) &&
+           readI2cRegister8(0x24, 0x02, mode) &&
+           id0 == 0xFF && id1 == 0xAA && mode == 0xFF;
+}
+
+static bool write7BRegisterDriver(uint8_t reg, uint8_t value) {
+    uint8_t data[2] = {reg, value};
+    return i2c_master_write_to_device(
+        I2C_NUM_0,
+        0x24,
+        data,
+        sizeof(data),
+        pdMS_TO_TICKS(100)
+    ) == ESP_OK;
+}
+
+static bool readGt911Dimensions(uint8_t address, uint16_t &width, uint16_t &height) {
+    uint8_t product[4] = {};
+    uint8_t limits[4] = {};
+    if (!readI2cRegister16(address, 0x8140, product, sizeof(product)) ||
+        !readI2cRegister16(address, 0x8048, limits, sizeof(limits))) {
+        return false;
+    }
+    if (product[0] != '9' || product[1] != '1' || product[2] != '1') {
+        return false;
+    }
+    width = static_cast<uint16_t>(limits[0] | (limits[1] << 8));
+    height = static_cast<uint16_t>(limits[2] | (limits[3] << 8));
+    return true;
+}
+
+static bool prepare7BHardware() {
+    constexpr uint8_t TOUCH_RESET = 1U << 1;
+    constexpr uint8_t BACKLIGHT = 1U << 2;
+    constexpr uint8_t LCD_RESET = 1U << 3;
+    constexpr uint8_t LCD_VDD = 1U << 6;
+
+    if (!write7BRegisterDriver(0x02, 0xFF)) return false;
+    pinMode(4, OUTPUT);
+    digitalWrite(4, LOW);
+
+    lcd7bOutputState = static_cast<uint8_t>(0xFFU & ~(TOUCH_RESET | BACKLIGHT | LCD_RESET));
+    lcd7bOutputState |= LCD_VDD;
+    if (!write7BRegisterDriver(0x03, lcd7bOutputState)) return false;
+    delay(20);
+
+    lcd7bOutputState |= LCD_RESET;
+    if (!write7BRegisterDriver(0x03, lcd7bOutputState)) return false;
+    delay(100);
+
+    lcd7bOutputState |= TOUCH_RESET;
+    if (!write7BRegisterDriver(0x03, lcd7bOutputState)) return false;
+    delay(200);
+    pinMode(4, INPUT);
+    return true;
+}
+
+static Model detectAndPrepareModel() {
+    Model detected = Model::TouchLcd7;
+    uint16_t touchWidth = 0;
+    uint16_t touchHeight = 0;
+    bool probeOk = false;
+    bool controller7B = false;
+
+    bool i2cReady = beginProbeI2c();
+    if (i2cReady) {
+        controller7B = has7BControllerSignature();
+        for (uint8_t attempt = 0; attempt < 3 && !probeOk; attempt++) {
+            probeOk = readGt911Dimensions(0x5D, touchWidth, touchHeight) ||
+                      readGt911Dimensions(0x14, touchWidth, touchHeight);
+            if (!probeOk) delay(30);
+        }
+    }
+
+#if PLANE_RADAR_DISPLAY_PROFILE == 8
+    detected = Model::TouchLcd7B;
+#elif PLANE_RADAR_DISPLAY_PROFILE == 7
+    detected = Model::TouchLcd7;
+#else
+    if ((probeOk && touchWidth == 1024 && touchHeight == 600) || controller7B) {
+        detected = Model::TouchLcd7B;
+    }
+#endif
+
+    RADAR_LOGI(
+        "[display] probe gt911=%d limits=%ux%u controller_7b=%d selected=%s\n",
+        probeOk ? 1 : 0,
+        static_cast<unsigned>(touchWidth),
+        static_cast<unsigned>(touchHeight),
+        controller7B ? 1 : 0,
+        detected == Model::TouchLcd7B ? "7B" : "7"
+    );
+
+    if (detected == Model::TouchLcd7B && (!i2cReady || !prepare7BHardware())) {
+        RADAR_LOGE("[display] 7B power/reset controller setup failed\n");
+    }
+    if (i2cReady) {
+        i2c_driver_delete(I2C_NUM_0);
+    }
+    return detected;
+}
+
+static BoardConfig make7BBoardConfig() {
+    BoardConfig config = ESP_PANEL_BOARD_DEFAULT_CONFIG;
+    config.name = "Waveshare:ESP32-S3-Touch-LCD-7B";
+    config.stage_callbacks.fill(nullptr);
+    config.io_expander.reset();
+    config.backlight.reset();
+
+    auto *rgb = std::get_if<BusRGB::Config>(&config.lcd->bus_config);
+    auto *refresh = rgb == nullptr
+        ? nullptr
+        : std::get_if<BusRGB::RefreshPanelPartialConfig>(&rgb->refresh_panel);
+    if (refresh != nullptr) {
+        refresh->pclk_hz = PLANE_RADAR_RGB_7B_PCLK_HZ;
+        refresh->h_res = 1024;
+        refresh->v_res = 600;
+        refresh->hsync_pulse_width = 162;
+        refresh->hsync_back_porch = 152;
+        refresh->hsync_front_porch = 48;
+        refresh->vsync_pulse_width = 45;
+        refresh->vsync_back_porch = 13;
+        refresh->vsync_front_porch = 3;
+        refresh->bounce_buffer_size_px = 1024 * PLANE_RADAR_RGB_BOUNCE_LINES;
+        refresh->flags_pclk_active_neg = true;
+    }
+
+    auto *lcdVendor = std::get_if<LCD::VendorPartialConfig>(
+        &config.lcd->device_config.vendor
+    );
+    if (lcdVendor != nullptr) {
+        lcdVendor->hor_res = 1024;
+        lcdVendor->ver_res = 600;
+    }
+
+    auto *touchDevice = std::get_if<Touch::DevicePartialConfig>(
+        &config.touch->device_config.device
+    );
+    if (touchDevice != nullptr) {
+        touchDevice->x_max = 1024;
+        touchDevice->y_max = 600;
+        touchDevice->rst_gpio_num = -1;
+        touchDevice->int_gpio_num = 4;
+    }
+    return config;
+}
 
 static const uint8_t *glyphFor(char c) {
     if (c == GLYPH_COPYRIGHT) {
@@ -114,7 +311,13 @@ static const uint8_t *glyphFor(char c) {
 
 bool Canvas::begin() {
     RADAR_LOGD("[display] ESP32_Display_Panel backend begin\n");
-    board = new Board();
+    _model = detectAndPrepareModel();
+    if (_model == Model::TouchLcd7B) {
+        BoardConfig config = make7BBoardConfig();
+        board = new Board(config);
+    } else {
+        board = new Board();
+    }
     if (board == nullptr) {
         RADAR_LOGE("[display] Board allocation failed\n");
         return false;
@@ -146,7 +349,16 @@ bool Canvas::begin() {
         return false;
     }
 
-    size_t pixels = static_cast<size_t>(WIDTH) * HEIGHT;
+    _width = lcd->getFrameWidth();
+    _height = lcd->getFrameHeight();
+    if (_model == Model::TouchLcd7B) {
+        lcd7bOutputState |= 1U << 2;
+        if (!write7BRegisterDriver(0x03, lcd7bOutputState)) {
+            RADAR_LOGE("[display] 7B backlight enable failed\n");
+        }
+    }
+
+    size_t pixels = static_cast<size_t>(_width) * _height;
     _driverFb[0] = static_cast<uint16_t *>(lcd->getFrameBufferByIndex(0));
     _driverFb[1] = static_cast<uint16_t *>(lcd->getFrameBufferByIndex(1));
     if (_driverFb[0] != nullptr && _driverFb[1] != nullptr) {
@@ -231,7 +443,7 @@ bool Canvas::present() {
         _drawFbIndex ^= 1;
         _fb = _driverFb[_drawFbIndex];
     } else {
-        if (!lcd->drawBitmap(0, 0, WIDTH, HEIGHT, reinterpret_cast<const uint8_t *>(_fb), -1)) {
+        if (!lcd->drawBitmap(0, 0, _width, _height, reinterpret_cast<const uint8_t *>(_fb), -1)) {
             RADAR_LOGE("[display] drawBitmap failed\n");
             return false;
         }
@@ -255,8 +467,8 @@ bool Canvas::readTouch(uint16_t *x, uint16_t *y) {
     if (count <= 0) {
         return false;
     }
-    if (x != nullptr) *x = static_cast<uint16_t>(std::max(0, std::min(WIDTH - 1, points[0].x)));
-    if (y != nullptr) *y = static_cast<uint16_t>(std::max(0, std::min(HEIGHT - 1, points[0].y)));
+    if (x != nullptr) *x = static_cast<uint16_t>(std::max(0, std::min(_width - 1, points[0].x)));
+    if (y != nullptr) *y = static_cast<uint16_t>(std::max(0, std::min(_height - 1, points[0].y)));
     return true;
 }
 
@@ -267,31 +479,43 @@ const uint16_t *Canvas::displayedFrameBuffer() const {
     return _fb;
 }
 
+const char *Canvas::modelName() const {
+    return _model == Model::TouchLcd7B
+        ? "ESP32-S3-Touch-LCD-7B"
+        : "ESP32-S3-Touch-LCD-7";
+}
+
+uint32_t Canvas::pixelClockHz() const {
+    return _model == Model::TouchLcd7B
+        ? PLANE_RADAR_RGB_7B_PCLK_HZ
+        : PLANE_RADAR_RGB_PCLK_HZ;
+}
+
 uint16_t Canvas::color565(uint8_t r, uint8_t g, uint8_t b) const {
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 }
 
 void Canvas::fillScreen(uint16_t color) {
     if (_fb == nullptr) return;
-    std::fill(_fb, _fb + static_cast<size_t>(WIDTH) * HEIGHT, color);
+    std::fill(_fb, _fb + static_cast<size_t>(_width) * _height, color);
 }
 
 void Canvas::fillRect(int x, int y, int w, int h, uint16_t color) {
     if (_fb == nullptr || w <= 0 || h <= 0) return;
     int x0 = std::max(0, x);
     int y0 = std::max(0, y);
-    int x1 = std::min(WIDTH, x + w);
-    int y1 = std::min(HEIGHT, y + h);
+    int x1 = std::min(_width, x + w);
+    int y1 = std::min(_height, y + h);
     if (x0 >= x1 || y0 >= y1) return;
     for (int yy = y0; yy < y1; yy++) {
-        uint16_t *row = _fb + static_cast<size_t>(yy) * WIDTH;
+        uint16_t *row = _fb + static_cast<size_t>(yy) * _width;
         std::fill(row + x0, row + x1, color);
     }
 }
 
 void Canvas::drawPixel(int x, int y, uint16_t color) {
-    if (_fb == nullptr || x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
-    _fb[static_cast<size_t>(y) * WIDTH + x] = color;
+    if (_fb == nullptr || x < 0 || x >= _width || y < 0 || y >= _height) return;
+    _fb[static_cast<size_t>(y) * _width + x] = color;
 }
 
 void Canvas::drawLine(int x0, int y0, int x1, int y1, uint16_t color) {
@@ -378,9 +602,9 @@ static int edgeValue(int ax, int ay, int bx, int by, int px, int py) {
 
 void Canvas::fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t color) {
     int minX = std::max(0, std::min({x0, x1, x2}));
-    int maxX = std::min(WIDTH - 1, std::max({x0, x1, x2}));
+    int maxX = std::min(_width - 1, std::max({x0, x1, x2}));
     int minY = std::max(0, std::min({y0, y1, y2}));
-    int maxY = std::min(HEIGHT - 1, std::max({y0, y1, y2}));
+    int maxY = std::min(_height - 1, std::max({y0, y1, y2}));
     int area = edgeValue(x0, y0, x1, y1, x2, y2);
     if (area == 0) return;
     for (int y = minY; y <= maxY; y++) {
@@ -411,13 +635,13 @@ void Canvas::blitRGB565(int x, int y, int w, int h, const uint16_t *pixels, int 
         h += y;
         y = 0;
     }
-    w = std::min(w, WIDTH - x);
-    h = std::min(h, HEIGHT - y);
+    w = std::min(w, _width - x);
+    h = std::min(h, _height - y);
     if (w <= 0 || h <= 0) return;
 
     for (int row = 0; row < h; row++) {
         const uint16_t *src = pixels + static_cast<size_t>(srcY + row) * stride + srcX;
-        uint16_t *dst = _fb + static_cast<size_t>(y + row) * WIDTH + x;
+        uint16_t *dst = _fb + static_cast<size_t>(y + row) * _width + x;
         memcpy(dst, src, static_cast<size_t>(w) * sizeof(uint16_t));
     }
 }
@@ -436,8 +660,8 @@ void Canvas::blendAlphaMask4(
     int sourceY = std::max(0, -y);
     int destinationX = std::max(0, x);
     int destinationY = std::max(0, y);
-    int drawWidth = std::min(w - sourceX, WIDTH - destinationX);
-    int drawHeight = std::min(h - sourceY, HEIGHT - destinationY);
+    int drawWidth = std::min(w - sourceX, _width - destinationX);
+    int drawHeight = std::min(h - sourceY, _height - destinationY);
     if (drawWidth <= 0 || drawHeight <= 0) return;
 
     uint16_t sourceRed = (color >> 11) & 0x1f;
@@ -445,7 +669,7 @@ void Canvas::blendAlphaMask4(
     uint16_t sourceBlue = color & 0x1f;
     for (int row = 0; row < drawHeight; row++) {
         uint16_t *destination = _fb +
-            static_cast<size_t>(destinationY + row) * WIDTH + destinationX;
+            static_cast<size_t>(destinationY + row) * _width + destinationX;
         size_t sourcePixel = static_cast<size_t>(sourceY + row) * w + sourceX;
         for (int column = 0; column < drawWidth; column++, sourcePixel++) {
             uint8_t packed = pgm_read_byte(packedAlpha + (sourcePixel >> 1));

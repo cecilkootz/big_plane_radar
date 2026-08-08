@@ -16,8 +16,11 @@ enum class textdatum_t {
 
 namespace PanelDisplay {
 
-static constexpr int WIDTH = 800;
-static constexpr int HEIGHT = 480;
+enum class Model : uint8_t {
+    TouchLcd7,
+    TouchLcd7B,
+};
+
 static constexpr char GLYPH_COPYRIGHT = '\x1e';
 static constexpr char GLYPH_ARROW_DOWN = '\x1f';
 
@@ -61,8 +64,11 @@ public:
     void drawMediumString(const String &text, int x, int y);
     void drawMediumString(const char *text, int x, int y);
 
-    int width() const { return WIDTH; }
-    int height() const { return HEIGHT; }
+    int width() const { return _width; }
+    int height() const { return _height; }
+    Model model() const { return _model; }
+    const char *modelName() const;
+    uint32_t pixelClockHz() const;
     int getRotation() const { return 0; }
     void startWrite() {}
     void endWrite() {}
@@ -70,6 +76,9 @@ public:
 private:
     uint16_t *_fb = nullptr;
     uint16_t *_driverFb[2] = {nullptr, nullptr};
+    int _width = 800;
+    int _height = 480;
+    Model _model = Model::TouchLcd7;
     uint8_t _drawFbIndex = 0;
     bool _usingDriverFrameBuffers = false;
     uint8_t _textSize = 1;

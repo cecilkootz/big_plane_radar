@@ -54,20 +54,20 @@ enum class AirportSelectionMode : uint8_t {
     Manual = 1,
 };
 
-static constexpr int SCREEN_W = 800;
-static constexpr int SCREEN_H = 480;
-static constexpr int RADAR_CX = 260;
-static constexpr int RADAR_CY = SCREEN_H / 2;
-static constexpr int RADAR_RADIUS = 218;
-static constexpr int PANEL_X = 520;
+static int SCREEN_W = 800;
+static int SCREEN_H = 480;
+static int RADAR_CX = 260;
+static int RADAR_CY = 240;
+static int RADAR_RADIUS = 218;
+static int PANEL_X = 520;
 static constexpr int MAP_EDGE_MARKER_MARGIN = 5;
 static constexpr int PANEL_PAD = 10;
-static constexpr int PANEL_TEXT_X = PANEL_X + 42;
-static constexpr int PANEL_RIGHT = SCREEN_W - 10;
+static int PANEL_TEXT_X = 562;
+static int PANEL_RIGHT = 790;
 static constexpr int PANEL_LIST_TOP = 42;
 static constexpr int PANEL_ROW_H = 54;
-static constexpr size_t PANEL_MAX_ROWS =
-    (SCREEN_H - PANEL_LIST_TOP - 4) / PANEL_ROW_H;
+static constexpr size_t PANEL_MAX_ROWS = 12;
+static size_t panelVisibleRows = 8;
 static constexpr int AIRCRAFT_LABEL_LINE_ADVANCE = 9;
 static constexpr int AIRCRAFT_LABEL_LINE_HEIGHT = 7;
 static constexpr int AIRCRAFT_LABEL_PADDING = 1;
@@ -109,6 +109,24 @@ static constexpr size_t ROUTE_CITY_MIN_PREFIX = 3;
 static auto &screen = PanelDisplay::screen;
 static WebServer server(80);
 static Preferences prefs;
+
+static void configureDisplayLayout() {
+    SCREEN_W = screen.width();
+    SCREEN_H = screen.height();
+    PANEL_X = screen.model() == PanelDisplay::Model::TouchLcd7B
+        ? 680
+        : 520;
+    PANEL_X = std::min(PANEL_X, SCREEN_W - 240);
+    RADAR_CX = PANEL_X / 2;
+    RADAR_CY = SCREEN_H / 2;
+    RADAR_RADIUS = std::min(RADAR_CY - 22, RADAR_CX - 42);
+    PANEL_TEXT_X = PANEL_X + 42;
+    PANEL_RIGHT = SCREEN_W - 10;
+    panelVisibleRows = std::min(
+        PANEL_MAX_ROWS,
+        static_cast<size_t>(std::max(0, SCREEN_H - PANEL_LIST_TOP - 4) / PANEL_ROW_H)
+    );
+}
 
 struct AppConfig {
     String ssid;
@@ -732,7 +750,7 @@ static void formatBootStageStatus(const BootStage &stage, char *out, size_t outL
 static void drawBootStageLine(const BootStage &stage, uint8_t index, int y) {
     const int numberX = 48;
     const int labelX = 78;
-    const int statusRight = 748;
+    const int statusRight = SCREEN_W - 52;
     uint16_t bootBg = screen.color565(1, 6, 5);
     uint16_t bootText = screen.color565(230, 255, 235);
     uint16_t bootDim = screen.color565(95, 165, 125);
@@ -792,7 +810,7 @@ static void drawBootScreen() {
     screen.setTextSize(1);
     screen.setTextColor(bootDim, bootBg);
     screen.drawString("BOOT LOG / ESP32-S3 / 240MHZ", 52, 62);
-    screen.drawWideLine(52, 82, 748, 82, 1.0f, bootLine);
+    screen.drawWideLine(52, 82, SCREEN_W - 52, 82, 1.0f, bootLine);
 
     uint8_t visibleCount = 0;
     while (visibleCount < BOOT_STAGE_COUNT && bootStages[visibleCount].revealed) {
@@ -800,7 +818,7 @@ static void drawBootScreen() {
     }
 
     const int contentTop = 100;
-    const int contentBottom = 426;
+    const int contentBottom = SCREEN_H - 54;
     int totalHeight = 0;
     for (uint8_t i = 0; i < visibleCount; i++) {
         totalHeight += bootStageHeight(bootStages[i]);
@@ -835,7 +853,7 @@ static void drawBootScreen() {
     screen.setTextDatum(textdatum_t::top_left);
     screen.setTextSize(1);
     screen.setTextColor(bootDim, bootBg);
-    screen.drawString("LONG PRESS SCREEN FOR SETUP", 54, 444);
+    screen.drawString("LONG PRESS SCREEN FOR SETUP", 54, SCREEN_H - 36);
     presentScreenOrRestart();
 }
 
@@ -851,8 +869,20 @@ static void resetBootScreen() {
     bootStages[BOOT_LCD].status = BootStatus::Running;
     bootStages[BOOT_LCD].startedMs = millis();
     bootStages[BOOT_LCD].revealed = true;
-    strlcpy(bootStages[BOOT_LCD].details[0], "FRAMEBUFFER 800X480 RGB565", sizeof(bootStages[BOOT_LCD].details[0]));
-    strlcpy(bootStages[BOOT_LCD].details[1], "RGB PANEL / GT911 TOUCH / DOUBLE BUFFER", sizeof(bootStages[BOOT_LCD].details[1]));
+    snprintf(
+        bootStages[BOOT_LCD].details[0],
+        sizeof(bootStages[BOOT_LCD].details[0]),
+        "FRAMEBUFFER %dX%d RGB565",
+        SCREEN_W,
+        SCREEN_H
+    );
+    snprintf(
+        bootStages[BOOT_LCD].details[1],
+        sizeof(bootStages[BOOT_LCD].details[1]),
+        "%s / %luMHZ PCLK / DOUBLE BUFFER",
+        screen.model() == PanelDisplay::Model::TouchLcd7B ? "LCD 7B" : "LCD 7",
+        static_cast<unsigned long>(screen.pixelClockHz() / 1000000UL)
+    );
     bootStages[BOOT_LCD].detailCount = 2;
     bootScreenActive = true;
     drawBootScreen();
@@ -1131,11 +1161,11 @@ static bool preloadMapCache() {
 
 static void drawBootSetupHint(const char *text, uint16_t color) {
     uint16_t bootBg = screen.color565(1, 6, 5);
-    screen.fillRect(54, 436, 420, 26, bootBg);
+    screen.fillRect(54, SCREEN_H - 44, 420, 26, bootBg);
     screen.setTextDatum(textdatum_t::top_left);
     screen.setTextSize(1);
     screen.setTextColor(color, bootBg);
-    screen.drawString(text, 54, 444);
+    screen.drawString(text, 54, SCREEN_H - 36);
     presentScreenOrRestart();
 }
 
@@ -1490,9 +1520,14 @@ static void handleScreenshot() {
         return;
     }
 
-    static constexpr uint32_t rowBytes = SCREEN_W * 3;
-    static constexpr uint32_t pixelBytes = rowBytes * SCREEN_H;
-    static constexpr uint32_t fileBytes = 54 + pixelBytes;
+    if (SCREEN_W > 1024) {
+        server.send(503, "text/plain", "Unsupported framebuffer width");
+        return;
+    }
+    const uint32_t rowBytes = static_cast<uint32_t>(SCREEN_W) * 3U;
+    const uint32_t paddedRowBytes = (rowBytes + 3U) & ~3U;
+    const uint32_t pixelBytes = paddedRowBytes * static_cast<uint32_t>(SCREEN_H);
+    const uint32_t fileBytes = 54U + pixelBytes;
 
     uint8_t header[54] = {};
     header[0] = 'B';
@@ -1514,7 +1549,7 @@ static void handleScreenshot() {
     WiFiClient client = server.client();
     client.write(header, sizeof(header));
 
-    uint8_t row[rowBytes];
+    uint8_t row[1024 * 3] = {};
     for (int y = SCREEN_H - 1; y >= 0 && client.connected(); y--) {
         const uint16_t *src = fb + static_cast<size_t>(y) * SCREEN_W;
         for (int x = 0; x < SCREEN_W; x++) {
@@ -1523,7 +1558,10 @@ static void handleScreenshot() {
             row[x * 3 + 1] = expand6((px >> 5) & 0x3F);
             row[x * 3 + 2] = expand5((px >> 11) & 0x1F);
         }
-        client.write(row, rowBytes);
+        if (paddedRowBytes > rowBytes) {
+            memset(row + rowBytes, 0, paddedRowBytes - rowBytes);
+        }
+        client.write(row, paddedRowBytes);
         if ((y & 0x0F) == 0) {
             AppWatchdog::feed();
         }
@@ -3162,7 +3200,7 @@ static void drawAircraftList(
     g.drawString(rangeTitle, PANEL_RIGHT, 10);
 
     int textWidth = PANEL_RIGHT - PANEL_TEXT_X;
-    int maxRows = static_cast<int>(PANEL_MAX_ROWS);
+    int maxRows = static_cast<int>(panelVisibleRows);
     int drawn = 0;
     for (int idx = static_cast<int>(itemCount) - 1; idx >= 0 && drawn < maxRows; idx--) {
         const Aircraft &item = items[idx];
@@ -3409,7 +3447,12 @@ static void drawRadar() {
         aircraftObstacleCount,
         staticLabelObstacles,
         sizeof(staticLabelObstacles) / sizeof(staticLabelObstacles[0]),
-        RadarLabels::LabelLayoutBounds{4.0f, 4.0f, 508.0f, 476.0f},
+        RadarLabels::LabelLayoutBounds{
+            4.0f,
+            4.0f,
+            static_cast<float>(PANEL_X - 12),
+            static_cast<float>(SCREEN_H - 4)
+        },
         labelLayoutNowMs,
         labelLayoutRevision,
         labelLayoutDeltaSeconds,
@@ -3494,7 +3537,7 @@ static bool handleAircraftListTap(uint16_t x, uint16_t y) {
     }
 
     size_t row = static_cast<size_t>((y - PANEL_LIST_TOP) / PANEL_ROW_H);
-    if (row >= visibleListRowCount || row >= PANEL_MAX_ROWS) {
+    if (row >= visibleListRowCount || row >= panelVisibleRows) {
         return true;
     }
 
@@ -3696,7 +3739,12 @@ static void benchmarkAircraftLabelLayout() {
         MAX_AIRCRAFT,
         nullptr,
         0,
-        RadarLabels::LabelLayoutBounds{4.0f, 4.0f, 508.0f, 476.0f},
+        RadarLabels::LabelLayoutBounds{
+            4.0f,
+            4.0f,
+            static_cast<float>(PANEL_X - 12),
+            static_cast<float>(SCREEN_H - 4)
+        },
         millis(),
         1,
         1.0f / 30.0f,
@@ -3713,7 +3761,12 @@ static void benchmarkAircraftLabelLayout() {
         MAX_AIRCRAFT,
         nullptr,
         0,
-        RadarLabels::LabelLayoutBounds{4.0f, 4.0f, 508.0f, 476.0f},
+        RadarLabels::LabelLayoutBounds{
+            4.0f,
+            4.0f,
+            static_cast<float>(PANEL_X - 12),
+            static_cast<float>(SCREEN_H - 4)
+        },
         millis(),
         1,
         1.0f / 30.0f,
@@ -3760,6 +3813,16 @@ void setup() {
             delay(1000);
         }
     }
+    configureDisplayLayout();
+    RADAR_LOGI(
+        "[display] model=%s resolution=%dx%d pclk=%lu layout=%d+%d\n",
+        screen.modelName(),
+        SCREEN_W,
+        SCREEN_H,
+        static_cast<unsigned long>(screen.pixelClockHz()),
+        PANEL_X,
+        SCREEN_W - PANEL_X
+    );
     BuildDiagnostics::logMemory("display-ready");
     logStep("display end");
     initAircraftTrackCache();
@@ -3901,10 +3964,27 @@ void setup() {
         }
     }
     setBootStage(BOOT_INTERFACE, BootStatus::Running);
+    char radarViewLine[48];
+    char aircraftListLine[48];
+    snprintf(
+        radarViewLine,
+        sizeof(radarViewLine),
+        "RADAR VIEW / %dX%d",
+        PANEL_X,
+        SCREEN_H
+    );
+    snprintf(
+        aircraftListLine,
+        sizeof(aircraftListLine),
+        "AIRCRAFT LIST / %dX%d / %u ROWS",
+        SCREEN_W - PANEL_X,
+        SCREEN_H,
+        static_cast<unsigned>(panelVisibleRows)
+    );
     setBootStageDetails(
         BOOT_INTERFACE,
-        "RADAR VIEW / 520X480",
-        "AIRCRAFT LIST / 280X480",
+        radarViewLine,
+        aircraftListLine,
         "TOUCH / GT911 / FRAME LOOP UNLOCKED",
         "PREPARING FIRST FRAME"
     );

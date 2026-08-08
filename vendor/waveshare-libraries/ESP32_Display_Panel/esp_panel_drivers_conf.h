@@ -24,12 +24,12 @@
  * Enable or disable bus drivers used in the factory class. Disable to reduce code size.
  * Set to `1` to enable, `0` to disable.
  */
-#define ESP_PANEL_DRIVERS_BUS_USE_ALL                   (1)
+#define ESP_PANEL_DRIVERS_BUS_USE_ALL                   (0)
 #if !ESP_PANEL_DRIVERS_BUS_USE_ALL
     #define ESP_PANEL_DRIVERS_BUS_USE_SPI               (0)
     #define ESP_PANEL_DRIVERS_BUS_USE_QSPI              (0)
-    #define ESP_PANEL_DRIVERS_BUS_USE_RGB               (0)
-    #define ESP_PANEL_DRIVERS_BUS_USE_I2C               (0)
+    #define ESP_PANEL_DRIVERS_BUS_USE_RGB               (1)
+    #define ESP_PANEL_DRIVERS_BUS_USE_I2C               (1)
     #define ESP_PANEL_DRIVERS_BUS_USE_MIPI_DSI          (0)
 #endif // ESP_PANEL_DRIVERS_BUS_USE_ALL
 
@@ -77,7 +77,7 @@
     #define ESP_PANEL_DRIVERS_LCD_USE_NV3022B           (0)
     #define ESP_PANEL_DRIVERS_LCD_USE_SH8601            (0)
     #define ESP_PANEL_DRIVERS_LCD_USE_SPD2010           (0)
-    #define ESP_PANEL_DRIVERS_LCD_USE_ST7262            (0)
+    #define ESP_PANEL_DRIVERS_LCD_USE_ST7262            (1)
     #define ESP_PANEL_DRIVERS_LCD_USE_ST7701            (0)
     #define ESP_PANEL_DRIVERS_LCD_USE_ST7703            (0)
     #define ESP_PANEL_DRIVERS_LCD_USE_ST7789            (0)
@@ -127,7 +127,7 @@
     #define ESP_PANEL_DRIVERS_TOUCH_USE_CHSC6540        (0)
     #define ESP_PANEL_DRIVERS_TOUCH_USE_CST816S         (0)
     #define ESP_PANEL_DRIVERS_TOUCH_USE_FT5x06          (0)
-    #define ESP_PANEL_DRIVERS_TOUCH_USE_GT911           (0)
+    #define ESP_PANEL_DRIVERS_TOUCH_USE_GT911           (1)
     #define ESP_PANEL_DRIVERS_TOUCH_USE_GT1151          (0)
     #define ESP_PANEL_DRIVERS_TOUCH_USE_SPD2010         (0)
     #define ESP_PANEL_DRIVERS_TOUCH_USE_ST1633          (0)
@@ -207,7 +207,7 @@
  */
 #define ESP_PANEL_DRIVERS_EXPANDER_USE_ALL                      (0)
 #if !ESP_PANEL_DRIVERS_EXPANDER_USE_ALL
-    #define ESP_PANEL_DRIVERS_EXPANDER_USE_CH422G               (0)
+    #define ESP_PANEL_DRIVERS_EXPANDER_USE_CH422G               (1)
     #define ESP_PANEL_DRIVERS_EXPANDER_USE_HT8574               (0)
     #define ESP_PANEL_DRIVERS_EXPANDER_USE_TCA95XX_8BIT         (0)
     #define ESP_PANEL_DRIVERS_EXPANDER_USE_TCA95XX_16BIT        (0)

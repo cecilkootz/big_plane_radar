@@ -18,7 +18,8 @@ static constexpr size_t MAP_MAX_PNG_BYTES = 256 * 1024;
 static constexpr int MAP_TILE_SIZE = 256;
 static constexpr int MAP_MAX_TILE_COLUMNS = 6;
 static constexpr int MAP_MAX_TILE_ROWS = 6;
-static constexpr int MAP_MAX_SOURCE_SIZE = 1040;
+static constexpr int MAP_MAX_SOURCE_WIDTH = MAP_MAX_TILE_COLUMNS * MAP_TILE_SIZE;
+static constexpr int MAP_MAX_SOURCE_HEIGHT = MAP_MAX_TILE_ROWS * MAP_TILE_SIZE;
 static constexpr unsigned MAP_DOWNLOAD_PROGRESS_STEPS = 5;
 static constexpr double WEB_MERCATOR_MAX_LATITUDE = 85.05112878;
 static constexpr double WEB_MERCATOR_METERS_PER_PIXEL_Z0 = 156543.03392804097;
@@ -611,8 +612,8 @@ bool Background::fetchStadia(
     progress.tileColumns = geometry.tileColumns;
     progress.tileRows = geometry.tileRows;
 
-    if (geometry.sourceWidth > MAP_MAX_SOURCE_SIZE ||
-        geometry.sourceHeight > MAP_MAX_SOURCE_SIZE ||
+    if (geometry.sourceWidth > MAP_MAX_SOURCE_WIDTH ||
+        geometry.sourceHeight > MAP_MAX_SOURCE_HEIGHT ||
         geometry.tileColumns <= 0 || geometry.tileRows <= 0 ||
         geometry.tileColumns > MAP_MAX_TILE_COLUMNS ||
         geometry.tileRows > MAP_MAX_TILE_ROWS) {
