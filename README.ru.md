@@ -2,15 +2,18 @@
 
 [English version](README.md)
 
-Прошивка для дисплея Waveshare ESP32-S3-Touch-LCD-7. Показывает живой ADS-B
-радар вокруг заданной точки: самолёты, подписи, высоту, вертикальную скорость,
-кольца дальности и компактный список бортов справа.
+Прошивка для дисплеев Waveshare ESP32-S3-Touch-LCD-7 и
+ESP32-S3-Touch-LCD-7B. Показывает живой ADS-B радар вокруг заданной точки:
+самолёты, подписи, высоту, вертикальную скорость, кольца дальности и компактный
+список бортов справа.
 
 Проект не использует LVGL. Интерфейс рисуется напрямую в RGB565 framebuffer, а
-для 800x480 RGB LCD и тача GT911 используется официальный стек Waveshare
-`ESP32_Display_Panel`.
+для RGB LCD и тача GT911 используется официальный стек Waveshare
+`ESP32_Display_Panel`. Один универсальный бинарник до запуска панели определяет
+модель и выбирает правильные RGB-тайминги, границы тача, размер карты и layout
+для 800x480 либо 1024x600.
 
-![Big Plane Radar на Waveshare ESP32-S3-Touch-LCD-7](docs/plane-radar.png)
+![Big Plane Radar на дисплее Waveshare ESP32-S3-Touch-LCD](docs/plane-radar.png)
 
 ## Быстрый старт (рекомендуемый способ)
 
@@ -19,7 +22,7 @@ IDE, `arduino-cli`, Python и `esptool` не нужны.
 
 ### Что понадобится
 
-- Waveshare ESP32-S3-Touch-LCD-7;
+- Waveshare ESP32-S3-Touch-LCD-7 или ESP32-S3-Touch-LCD-7B;
 - USB-кабель с передачей данных, а не кабель только для зарядки;
 - компьютер с Windows, macOS или Linux и Google Chrome либо Microsoft Edge;
 - сеть Wi-Fi 2,4 ГГц и пароль от неё. ESP32-S3 не подключается к сети только на
@@ -126,8 +129,10 @@ IDE, `arduino-cli`, Python и `esptool` не нужны.
 - **Радар пустой:** проверьте Wi-Fi и координаты, затем тапом по радару выберите
   больший радиус.
 
-Официальная документация платы доступна в
-[Waveshare wiki](https://docs.waveshare.com/ESP32-S3-Touch-LCD-7).
+Официальная документация плат:
+
+- [ESP32-S3-Touch-LCD-7 wiki](https://docs.waveshare.com/ESP32-S3-Touch-LCD-7)
+- [ESP32-S3-Touch-LCD-7B wiki](https://docs.waveshare.com/ESP32-S3-Touch-LCD-7B)
 
 ## 3D-печатный стенд
 
@@ -137,9 +142,15 @@ https://makerworld.com/ru/models/3034679-stand-for-esp32-s3-touch-lcd-7-for-plan
 
 ## Железо
 
-- Waveshare ESP32-S3-Touch-LCD-7, RGB LCD 800x480
+- Waveshare ESP32-S3-Touch-LCD-7, RGB LCD 800x480, или
+  ESP32-S3-Touch-LCD-7B, RGB LCD 1024x600
 - USB-кабель с передачей данных, подключенный в порт `UART1`
 - Переключатель на плате должен стоять в положении `UART1`
+
+Один и тот же образ прошивки поддерживает оба дисплея. При загрузке он проверяет
+конфигурацию GT911 и контроллер платы 7B до создания RGB-панели. Обычный дисплей
+сохраняет layout 520+280 и PCLK 13 МГц; 7B использует layout 680+344 и
+официальные тайминги панели Waveshare с PCLK 30 МГц.
 
 На macOS может понадобиться USB serial driver, если плата не появляется как
 `/dev/cu.usbmodem*` или `/dev/cu.wchusbserial*`. На Linux устройство обычно
@@ -148,6 +159,8 @@ https://makerworld.com/ru/models/3034679-stand-for-esp32-s3-touch-lcd-7-for-plan
 
 ## Возможности
 
+- один универсальный образ с автоматическим определением
+  ESP32-S3-Touch-LCD-7/7B и layout под фактическое разрешение;
 - setup portal при первом запуске: `PlaneRadar-Setup`;
 - сохранение Wi-Fi, центра радара, единиц измерения, отображения аэропортов,
   режима символов, состава подписей, яркости карты и дальности в NVS;

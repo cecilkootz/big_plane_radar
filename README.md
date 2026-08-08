@@ -2,15 +2,17 @@
 
 [Русская версия](README.ru.md)
 
-Firmware for the Waveshare ESP32-S3-Touch-LCD-7 display. It shows a live ADS-B
-radar centered on a configurable location, with aircraft symbols, labels,
-altitude, vertical speed, range rings, and a compact aircraft list.
+Firmware for the Waveshare ESP32-S3-Touch-LCD-7 and ESP32-S3-Touch-LCD-7B
+displays. It shows a live ADS-B radar centered on a configurable location, with
+aircraft symbols, labels, altitude, vertical speed, range rings, and a compact
+aircraft list.
 
 The firmware does not use LVGL. It draws directly into an RGB565 framebuffer and
-uses Waveshare's official `ESP32_Display_Panel` stack for the 800x480 RGB LCD and
-GT911 touch panel.
+uses Waveshare's official `ESP32_Display_Panel` stack. One universal binary
+detects the connected model before panel initialization and selects the correct
+800x480 or 1024x600 RGB timings, touch bounds, map size, and interface layout.
 
-![Big Plane Radar running on Waveshare ESP32-S3-Touch-LCD-7](docs/plane-radar.png)
+![Big Plane Radar running on a Waveshare ESP32-S3-Touch-LCD display](docs/plane-radar.png)
 
 ## Quick Start (Recommended)
 
@@ -19,7 +21,7 @@ need Arduino IDE, `arduino-cli`, Python, or `esptool`.
 
 ### What you need
 
-- a Waveshare ESP32-S3-Touch-LCD-7;
+- a Waveshare ESP32-S3-Touch-LCD-7 or ESP32-S3-Touch-LCD-7B;
 - a USB cable that supports data, not a charge-only cable;
 - a Windows, macOS, or Linux computer with Google Chrome or Microsoft Edge;
 - a 2.4 GHz Wi-Fi network and its password. ESP32-S3 cannot connect to a
@@ -126,8 +128,10 @@ zoom, dimensions, PNG size, download progress, and decode time.
 - **The radar is empty:** verify Wi-Fi and location, then try a wider range by
   tapping the radar.
 
-The official board documentation is available on the
-[Waveshare wiki](https://docs.waveshare.com/ESP32-S3-Touch-LCD-7).
+Official board documentation:
+
+- [ESP32-S3-Touch-LCD-7 wiki](https://docs.waveshare.com/ESP32-S3-Touch-LCD-7)
+- [ESP32-S3-Touch-LCD-7B wiki](https://docs.waveshare.com/ESP32-S3-Touch-LCD-7B)
 
 ## 3D-Printed Stand
 
@@ -138,9 +142,15 @@ https://makerworld.com/ru/models/3034679-stand-for-esp32-s3-touch-lcd-7-for-plan
 
 ## Hardware
 
-- Waveshare ESP32-S3-Touch-LCD-7, 800x480 RGB LCD
+- Waveshare ESP32-S3-Touch-LCD-7, 800x480 RGB LCD, or
+  ESP32-S3-Touch-LCD-7B, 1024x600 RGB LCD
 - USB data cable connected to the board's `UART1` USB port
 - Board switch set to `UART1`
+
+The same firmware image supports both displays. At boot it probes the GT911
+configuration and the 7B board controller before creating the RGB panel. The
+original display keeps its 520+280 layout and 13 MHz PCLK; the 7B uses a
+680+344 layout and Waveshare's official 30 MHz panel timing.
 
 On macOS, install the USB serial driver if the board does not appear as
 `/dev/cu.usbmodem*` or `/dev/cu.wchusbserial*`. On Linux, the device usually
@@ -149,6 +159,8 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
 
 ## Features
 
+- one universal firmware image with automatic ESP32-S3-Touch-LCD-7/7B
+  detection and resolution-aware layout;
 - first-boot setup portal: `PlaneRadar-Setup`;
 - saved Wi-Fi, radar center, units, airport overlay, aircraft symbol style,
   aircraft label, map brightness, and range settings in NVS;
