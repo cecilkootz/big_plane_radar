@@ -5,6 +5,11 @@
 #endif
 
 #ifndef PLANE_RADAR_RGB_7B_PCLK_HZ
+// Applied automatically when the 7B is auto-detected (make7BBoardConfig).
+// 30 MHz needs the high-perf SDK (build_arduino_highperf.sh): its 64-byte cache
+// line + PSRAM XIP give the scan-out DMA the bandwidth to avoid tearing at
+// 1024x600. On the stock precompiled SDK 30 MHz tears; for a stock build pass
+// RGB_7B_PCLK_MHZ=14.
 #define PLANE_RADAR_RGB_7B_PCLK_HZ (30 * 1000 * 1000)
 #endif
 
