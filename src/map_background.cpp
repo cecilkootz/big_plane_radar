@@ -633,7 +633,11 @@ bool Background::fetchStadia(
     }
 
     int stripWidth = geometry.tileColumns * MAP_TILE_SIZE;
-    size_t stripPixels = static_cast<size_t>(stripWidth) * (MAP_TILE_SIZE + 1);
+    // Allocate every strip at the fixed maximum size. A uniformly sized buffer
+    // means each freed strip leaves a slot the next view reuses exactly, avoiding
+    // the PSRAM fragmentation that made a later view's malloc fail while memory
+    // was still free. Processing still uses stripWidth for the actual tile span.
+    size_t stripPixels = static_cast<size_t>(MAP_MAX_SOURCE_WIDTH) * (MAP_TILE_SIZE + 1);
     auto *strip = static_cast<uint16_t *>(heap_caps_malloc(
         stripPixels * sizeof(uint16_t),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
