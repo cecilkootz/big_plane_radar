@@ -20,6 +20,8 @@
 #include "label_layout.h"
 #include "map_background.h"
 #include "panel_display.h"
+#include "route_json.h"
+#include "route_plausibility.h"
 
 #ifndef DEFAULT_WIFI_SSID
 #define DEFAULT_WIFI_SSID ""
@@ -225,6 +227,12 @@ struct RouteCacheEntry {
     bool active = false;
     bool hasRoute = false;
     bool lookupDone = false;
+    bool routeRejected = false;
+};
+
+struct RouteEndpointCoordinates {
+    RadarRoute::GeoPoint origin;
+    RadarRoute::GeoPoint destination;
 };
 
 struct AirportCityCacheEntry {
@@ -2148,7 +2156,10 @@ static void syncRouteCacheFromAircraft(uint32_t now) {
     pruneRouteCache(now);
 }
 
-static bool lookupRouteForCallsign(RouteCacheEntry &entry) {
+static bool lookupRouteForCallsign(
+    RouteCacheEntry &entry,
+    RouteEndpointCoordinates &coordinates
+) {
     String url = "https://api.adsbdb.com/v0/callsign/";
     url += entry.callsign;
 
@@ -2166,16 +2177,7 @@ static bool lookupRouteForCallsign(RouteCacheEntry &entry) {
     }
 
     JsonDocument filter;
-    filter["response"]["flightroute"]["origin"]["iata_code"] = true;
-    filter["response"]["flightroute"]["origin"]["iata"] = true;
-    filter["response"]["flightroute"]["origin"]["iataCode"] = true;
-    filter["response"]["flightroute"]["origin"]["municipality"] = true;
-    filter["response"]["flightroute"]["origin"]["name"] = true;
-    filter["response"]["flightroute"]["destination"]["iata_code"] = true;
-    filter["response"]["flightroute"]["destination"]["iata"] = true;
-    filter["response"]["flightroute"]["destination"]["iataCode"] = true;
-    filter["response"]["flightroute"]["destination"]["municipality"] = true;
-    filter["response"]["flightroute"]["destination"]["name"] = true;
+    RadarRoute::buildFlightRouteFilter(filter);
     JsonDocument doc;
     DeserializationError err = deserializeJson(
         doc,
@@ -2205,8 +2207,28 @@ static bool lookupRouteForCallsign(RouteCacheEntry &entry) {
     strlcpy(entry.destinationIata, destination, sizeof(entry.destinationIata));
     copyRouteCity(originAirport, entry.originCity, sizeof(entry.originCity));
     copyRouteCity(destinationAirport, entry.destinationCity, sizeof(entry.destinationCity));
+    coordinates.origin = RadarRoute::readAirportCoordinate(originAirport);
+    coordinates.destination = RadarRoute::readAirportCoordinate(destinationAirport);
     entry.hasRoute = true;
     return true;
+}
+
+static bool findAircraftPositionLocked(
+    const char *normalizedCallsign,
+    RadarRoute::GeoPoint &out
+) {
+    for (size_t i = 0; i < aircraftCount; i++) {
+        if (!aircraft[i].hasFlight) continue;
+        char normalized[10];
+        if (!normalizeCallsign(aircraft[i].callsign, normalized, sizeof(normalized))) {
+            continue;
+        }
+        if (strcmp(normalized, normalizedCallsign) != 0) continue;
+        out.lat = aircraft[i].lat;
+        out.lon = aircraft[i].lon;
+        return true;
+    }
+    return false;
 }
 
 static bool serviceRouteLookup() {
@@ -2229,7 +2251,7 @@ static bool serviceRouteLookup() {
 
     for (size_t i = 0; i < MAX_ROUTE_CACHE; i++) {
         RouteCacheEntry &entry = routeCache[i];
-        if (!entry.active || entry.hasRoute) continue;
+        if (!entry.active || entry.hasRoute || entry.routeRejected) continue;
         if (now - entry.lastSeenMs > ROUTE_CACHE_STALE_MS) continue;
         if (entry.lookupDone && now - entry.lastLookupMs < ROUTE_LOOKUP_RETRY_MS) continue;
 
@@ -2246,12 +2268,40 @@ static bool serviceRouteLookup() {
         return false;
     }
 
-    bool ok = lookupRouteForCallsign(lookupEntry);
+    RouteEndpointCoordinates coordinates;
+    bool ok = lookupRouteForCallsign(lookupEntry, coordinates);
 
     lockState();
     RouteCacheEntry *entry = findRouteCacheEntry(lookupEntry.callsign);
     if (entry != nullptr) {
+        bool rejected = false;
         if (ok) {
+            // The callsign route table is a static schedule, so a recycled
+            // flight number can describe a route this aircraft is not flying.
+            RadarRoute::GeoPoint position;
+            if (findAircraftPositionLocked(entry->callsign, position) &&
+                !RadarRoute::routeIsPlausible(
+                    coordinates.origin,
+                    coordinates.destination,
+                    position,
+                    RadarRoute::kRouteCorridorToleranceKm
+                )) {
+                rejected = true;
+                entry->routeRejected = true;
+                RADAR_LOGD(
+                    "[route] callsign=%s rejected %s-%s: %.0fkm off corridor\n",
+                    entry->callsign,
+                    lookupEntry.originIata,
+                    lookupEntry.destinationIata,
+                    static_cast<double>(RadarRoute::corridorDistanceKm(
+                        coordinates.origin,
+                        coordinates.destination,
+                        position
+                    ))
+                );
+            }
+        }
+        if (ok && !rejected) {
             strlcpy(entry->originIata, lookupEntry.originIata, sizeof(entry->originIata));
             strlcpy(entry->destinationIata, lookupEntry.destinationIata, sizeof(entry->destinationIata));
             strlcpy(entry->originCity, lookupEntry.originCity, sizeof(entry->originCity));
@@ -2273,13 +2323,15 @@ static bool serviceRouteLookup() {
             entry->hasRoute = true;
             networkDataDirty = true;
         }
-        RADAR_LOGD("[route] callsign=%s ok=%d origin=%s/%s destination=%s/%s\n",
+        RADAR_LOGD("[route] callsign=%s ok=%d rejected=%d origin=%s/%s destination=%s/%s\n",
                    entry->callsign,
                    ok ? 1 : 0,
+                   rejected ? 1 : 0,
                    entry->originIata,
                    entry->originCity,
                    entry->destinationIata,
                    entry->destinationCity);
+        ok = ok && !rejected;
     }
     unlockState();
     return ok;

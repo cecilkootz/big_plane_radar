@@ -32,6 +32,27 @@ The city cache is deliberately not written to flash. It fills automatically as
 aircraft are seen and starts empty after a restart. Missing city names fall back
 to their three-letter IATA codes.
 
+## Route Plausibility Check
+
+ADSBdb resolves a callsign against a static schedule table, so a recycled flight
+number can return a route the aircraft is not flying. Observed case: `DAL338`
+returned `New York -> San Diego` while the aircraft was descending over Tampa,
+1411 km from that corridor, on a Seattle to Fort Lauderdale flight.
+
+Each accepted response is therefore checked against the live position. The
+firmware reads the origin and destination coordinates the response already
+carries, measures the aircraft's distance to the great-circle corridor between
+them, and discards the route beyond 500 km. Distance clamps to the nearer
+airport off the ends of the segment, so departures and arrival holds are not
+affected. Ordinary routing deviation stays well inside the limit: a JFK to SAN
+flight over Denver measures 312 km.
+
+A discarded route shows no route line rather than a wrong one, and is not
+retried while the callsign stays cached. The check is skipped when the response
+omits coordinates or the aircraft has no position, so missing data never hides a
+good route. The trade-off is that a genuine diversion far off its filed corridor
+is also suppressed.
+
 Route text is normalized to the display's ASCII character set. Common Latin
 accents are transliterated. Before drawing, both city names are measured with the
 actual screen font. If the complete route is too wide, the visually longer city
@@ -121,3 +142,7 @@ from current OurAirports data.
 
 If a route shows IATA codes rather than cities, ADSBdb did not return usable
 municipality names and the cities were not yet present in the RAM cache.
+
+If an aircraft shows no route line at all, ADSBdb either had no entry for the
+callsign or returned one the plausibility check rejected. Build with
+`LOG_LEVEL=debug` and look for `[route] ... rejected=1` to tell the two apart.
