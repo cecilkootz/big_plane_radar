@@ -99,23 +99,6 @@ static bool insideForwardCone(
     return (dx * forwardX + dy * forwardY) / distance >= 0.76604444f;
 }
 
-static float labelAngle(
-    const LabelLayoutInput &input,
-    const LabelLayoutOutput &output
-) {
-    return atan2f(
-        output.y + input.height * 0.5f - input.anchorY,
-        output.x + input.width * 0.5f - input.anchorX
-    );
-}
-
-static float normalizeTestAngle(float angle) {
-    static constexpr float kPi = 3.14159265358979323846f;
-    while (angle > kPi) angle -= 2.0f * kPi;
-    while (angle <= -kPi) angle += 2.0f * kPi;
-    return angle;
-}
-
 static bool labelsOverlap(
     const LabelLayoutInput &leftInput,
     const LabelLayoutOutput &leftOutput,
@@ -297,7 +280,7 @@ static void testOrbitSearchKeepsBlockedLabelClose() {
     CHECK(output.visible);
 }
 
-static void testCrossingLabelsKeepOrbitDirection() {
+static void testCrossingLabelsMayOverlapWithoutOrbiting() {
     LabelLayout layout;
     layout.reset();
     LabelLayoutInput inputs[2] = {
@@ -311,9 +294,13 @@ static void testCrossingLabelsKeepOrbitDirection() {
         inputs, 2, nullptr, 0, nullptr, 0, kBounds,
         1000, 1, 0.033f, outputs
     );
+    float relativeX[2];
+    float relativeY[2];
+    for (size_t i = 0; i < 2; i++) {
+        relativeX[i] = outputs[i].x - inputs[i].anchorX;
+        relativeY[i] = outputs[i].y - inputs[i].anchorY;
+    }
 
-    int orbitSide = 0;
-    size_t sideChanges = 0;
     for (uint32_t frame = 1; frame <= 80; frame++) {
         inputs[0].anchorX += 0.75f;
         inputs[1].anchorX -= 0.75f;
@@ -321,73 +308,17 @@ static void testCrossingLabelsKeepOrbitDirection() {
             inputs, 2, nullptr, 0, nullptr, 0, kBounds,
             1000 + frame * 33, 1, 0.033f, outputs
         );
-
-        float relativeY = outputs[1].y + inputs[1].height * 0.5f -
-            inputs[1].anchorY;
-        if (fabsf(relativeY) > 1.0f) {
-            int side = relativeY > 0.0f ? 1 : -1;
-            if (orbitSide != 0 && side != orbitSide) sideChanges++;
-            orbitSide = side;
+        for (size_t i = 0; i < 2; i++) {
+            CHECK(fabsf(outputs[i].x - inputs[i].anchorX - relativeX[i]) < 0.25f);
+            CHECK(fabsf(outputs[i].y - inputs[i].anchorY - relativeY[i]) < 0.25f);
+            CHECK(outputs[i].visible);
         }
     }
 
-    float winnerRelativeY = outputs[0].y + inputs[0].height * 0.5f -
-        inputs[0].anchorY;
-    float yieldingRelativeY = outputs[1].y + inputs[1].height * 0.5f -
-        inputs[1].anchorY;
-    CHECK(sideChanges == 0);
-    CHECK(fabsf(winnerRelativeY) > 4.0f);
-    CHECK(fabsf(yieldingRelativeY) > 4.0f);
-    CHECK(winnerRelativeY * yieldingRelativeY < 0.0f);
-    CHECK(!labelsOverlap(inputs[0], outputs[0], inputs[1], outputs[1]));
+    CHECK(labelsOverlap(inputs[0], outputs[0], inputs[1], outputs[1]));
 }
 
-static void testFullCircleOrbitKeepsAStableRadius() {
-    LabelLayout layout;
-    layout.reset();
-    LabelLayoutInput inputs[2] = {
-        makeInput(10, 260, 240),
-        makeInput(20, 340, 240),
-    };
-    inputs[0].courseValid = false;
-    inputs[1].courseValid = false;
-    LabelLayoutOutput outputs[2];
-    layout.solve(
-        inputs, 2, nullptr, 0, nullptr, 0, kBounds,
-        1000, 1, 0.033f, outputs
-    );
-
-    inputs[1].anchorX = 260;
-    LabelRectObstacle nearSideBlocker{248, 120, 220, 240};
-    layout.solve(
-        inputs, 2, nullptr, 0, &nearSideBlocker, 1, kBounds,
-        1033, 1, 0.033f, outputs
-    );
-
-    float minimumGap = 1000.0f;
-    float maximumGap = -1000.0f;
-    bool stayedVisible = outputs[1].visible;
-    for (uint32_t frame = 2; frame <= 180; frame++) {
-        layout.solve(
-            inputs, 2, nullptr, 0, nullptr, 0, kBounds,
-            1000 + frame * 33, 1, 0.033f, outputs
-        );
-        float gap = labelGapFromSymbol(inputs[1], outputs[1]);
-        minimumGap = fminf(minimumGap, gap);
-        maximumGap = fmaxf(maximumGap, gap);
-        stayedVisible = stayedVisible && outputs[1].visible;
-    }
-
-    float finalAngleDegrees = fabsf(labelAngle(inputs[1], outputs[1])) /
-        0.01745329251994329577f;
-    CHECK(finalAngleDegrees > 150.0f);
-    CHECK(minimumGap >= 1.8f);
-    CHECK(maximumGap <= 5.0f);
-    CHECK(maximumGap - minimumGap <= 2.0f);
-    CHECK(stayedVisible);
-}
-
-static void testConvergingLabelsReserveDifferentDestinations() {
+static void testConvergingLabelsStayAnchoredWhenOverlapping() {
     LabelLayout layout;
     layout.reset();
     LabelLayoutInput inputs[3] = {
@@ -401,49 +332,38 @@ static void testConvergingLabelsReserveDifferentDestinations() {
         inputs, 3, nullptr, 0, nullptr, 0, kBounds,
         1000, 1, 0.033f, outputs
     );
+    float relativeX[3];
+    float relativeY[3];
+    for (size_t i = 0; i < 3; i++) {
+        relativeX[i] = outputs[i].x - inputs[i].anchorX;
+        relativeY[i] = outputs[i].y - inputs[i].anchorY;
+    }
 
     inputs[1].anchorX = 260;
     inputs[2].anchorX = 260;
+    LabelLayoutMetrics metrics;
     layout.solve(
         inputs, 3, nullptr, 0, nullptr, 0, kBounds,
-        1033, 1, 0.033f, outputs
+        1033, 1, 0.033f, outputs, &metrics
     );
-    float previousAngles[2] = {
-        labelAngle(inputs[1], outputs[1]),
-        labelAngle(inputs[2], outputs[2]),
-    };
-    int movementDirections[2] = {};
-    size_t directionChanges[2] = {};
-    bool stayedVisible = true;
     for (uint32_t frame = 2; frame <= 180; frame++) {
         layout.solve(
             inputs, 3, nullptr, 0, nullptr, 0, kBounds,
-            1000 + frame * 33, 1, 0.033f, outputs
+            1000 + frame * 33, 1, 0.033f, outputs, &metrics
         );
-        for (size_t movingIndex = 0; movingIndex < 2; movingIndex++) {
-            size_t outputIndex = movingIndex + 1;
-            float angle = labelAngle(inputs[outputIndex], outputs[outputIndex]);
-            float delta = normalizeTestAngle(angle - previousAngles[movingIndex]);
-            if (fabsf(delta) > 0.005f) {
-                int direction = delta > 0.0f ? 1 : -1;
-                if (movementDirections[movingIndex] != 0 &&
-                    direction != movementDirections[movingIndex]) {
-                    directionChanges[movingIndex]++;
-                }
-                movementDirections[movingIndex] = direction;
-            }
-            previousAngles[movingIndex] = angle;
+        for (size_t i = 0; i < 3; i++) {
+            CHECK(fabsf(outputs[i].x - inputs[i].anchorX - relativeX[i]) < 0.25f);
+            CHECK(fabsf(outputs[i].y - inputs[i].anchorY - relativeY[i]) < 0.25f);
+            CHECK(outputs[i].visible);
         }
-        stayedVisible = stayedVisible && outputs[0].visible &&
-            outputs[1].visible && outputs[2].visible;
     }
 
-    CHECK(directionChanges[0] == 0);
-    CHECK(directionChanges[1] == 0);
-    CHECK(!labelsOverlap(inputs[0], outputs[0], inputs[1], outputs[1]));
-    CHECK(!labelsOverlap(inputs[0], outputs[0], inputs[2], outputs[2]));
-    CHECK(!labelsOverlap(inputs[1], outputs[1], inputs[2], outputs[2]));
-    CHECK(stayedVisible);
+    CHECK(labelsOverlap(inputs[0], outputs[0], inputs[1], outputs[1]));
+    CHECK(labelsOverlap(inputs[0], outputs[0], inputs[2], outputs[2]));
+    CHECK(labelsOverlap(inputs[1], outputs[1], inputs[2], outputs[2]));
+    CHECK(metrics.visibleCount == 3);
+    CHECK(metrics.hiddenCount == 0);
+    CHECK(metrics.maxOverlapPx > 0.0f);
 }
 
 static void testRadialBlockerDoesNotPumpTheLabel() {
@@ -495,6 +415,52 @@ static void testRadialBlockerDoesNotPumpTheLabel() {
     CHECK(output.visible);
 }
 
+static void testAircraftBlockingReservedTargetDoesNotBounce() {
+    LabelLayout layout;
+    layout.reset();
+    LabelLayoutInput input = makeInput(7000, 260, 240);
+    input.courseValid = false;
+    AircraftObstacle obstacles[2] = {
+        makeOwnerObstacle(input),
+        {275.0f, 240.0f, 10.0f},
+    };
+    LabelLayoutOutput output;
+    layout.solve(
+        &input, 1, obstacles, 1, nullptr, 0, kBounds,
+        1000, 1, 0.033f, &output
+    );
+
+    float previousX = output.x;
+    float previousY = output.y;
+    int previousDirectionX = 0;
+    int previousDirectionY = 0;
+    size_t reversals = 0;
+    for (uint32_t frame = 1; frame <= 180; frame++) {
+        layout.solve(
+            &input, 1, obstacles, 2, nullptr, 0, kBounds,
+            1000 + frame * 33, 1, 0.033f, &output
+        );
+        float deltaX = output.x - previousX;
+        float deltaY = output.y - previousY;
+        int directionX = fabsf(deltaX) > 0.35f ? (deltaX > 0.0f ? 1 : -1) : 0;
+        int directionY = fabsf(deltaY) > 0.35f ? (deltaY > 0.0f ? 1 : -1) : 0;
+        if (directionX != 0 && previousDirectionX != 0 &&
+            directionX != previousDirectionX) reversals++;
+        if (directionY != 0 && previousDirectionY != 0 &&
+            directionY != previousDirectionY) reversals++;
+        if (directionX != 0) previousDirectionX = directionX;
+        if (directionY != 0) previousDirectionY = directionY;
+        previousX = output.x;
+        previousY = output.y;
+    }
+
+    float nearestX = fmaxf(output.x, fminf(obstacles[1].x, output.x + input.width));
+    float nearestY = fmaxf(output.y, fminf(obstacles[1].y, output.y + input.height));
+    CHECK(reversals <= 1);
+    CHECK(hypotf(nearestX - obstacles[1].x, nearestY - obstacles[1].y) >= 11.9f);
+    CHECK(output.visible);
+}
+
 static void runDenseScene(size_t count) {
     LabelLayout layout;
     layout.reset();
@@ -522,7 +488,8 @@ static void runDenseScene(size_t count) {
         CHECK(outputs[0].visible);
         CHECK(outputs[1].visible);
     }
-    CHECK(metrics.hiddenCount > 0);
+    CHECK(metrics.hiddenCount == 0);
+    CHECK(metrics.maxOverlapPx > 0.0f);
     CHECK(metrics.visibleCount + metrics.hiddenCount == count);
 }
 
@@ -549,10 +516,10 @@ int main() {
     testStaticObstacleAndLayoutRevision();
     testAnchorMovementAndTemporaryDisappearance();
     testOrbitSearchKeepsBlockedLabelClose();
-    testCrossingLabelsKeepOrbitDirection();
-    testFullCircleOrbitKeepsAStableRadius();
-    testConvergingLabelsReserveDifferentDestinations();
+    testCrossingLabelsMayOverlapWithoutOrbiting();
+    testConvergingLabelsStayAnchoredWhenOverlapping();
     testRadialBlockerDoesNotPumpTheLabel();
+    testAircraftBlockingReservedTargetDoesNotBounce();
     testDenseSceneAndMandatoryLabels();
     testNoHeapAllocationDuringSolve();
     puts("label_layout tests passed");

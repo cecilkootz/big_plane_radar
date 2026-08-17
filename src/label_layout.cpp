@@ -14,6 +14,7 @@ static constexpr float kNormalMaxGapPx = 64.0f;
 static constexpr float kPriorityMaxGapPx = 96.0f;
 static constexpr float kMaxMovementPxPerSecond = 64.0f;
 static constexpr float kMovementDeadZonePx = 0.25f;
+static constexpr bool kAllowLabelOverlap = true;
 static constexpr float kCourseAvoidDistancePx = 80.0f;
 static constexpr float kCourseConeCosineSquared = 0.58682409f;
 static constexpr float kInverseSqrtTwo = 0.70710678f;
@@ -481,17 +482,19 @@ void LabelLayout::solve(
                         obstacle.height
                     ) * 80.0f;
                 }
-                for (size_t previous = 0; previous < i; previous++) {
-                    score += rectOverlapDepth(
-                        candidateX,
-                        candidateY,
-                        input.width,
-                        input.height,
-                        work_[previous].x,
-                        work_[previous].y,
-                        work_[previous].input->width,
-                        work_[previous].input->height
-                    ) * 40.0f;
+                if (!kAllowLabelOverlap) {
+                    for (size_t previous = 0; previous < i; previous++) {
+                        score += rectOverlapDepth(
+                            candidateX,
+                            candidateY,
+                            input.width,
+                            input.height,
+                            work_[previous].x,
+                            work_[previous].y,
+                            work_[previous].input->width,
+                            work_[previous].input->height
+                        ) * 40.0f;
+                    }
                 }
                 if (score < bestScore) {
                     bestScore = score;
@@ -517,16 +520,8 @@ void LabelLayout::solve(
         state.layoutRevision = layoutRevision;
     }
 
-    auto placementHasHardConflict = [&](const WorkItem &work, float x, float y) {
+    auto placementHasAircraftConflict = [&](const WorkItem &work, float x, float y) {
         const LabelLayoutInput &input = *work.input;
-        if (isInsideForwardCone(
-                input,
-                x + input.width * 0.5f,
-                y + input.height * 0.5f,
-                work.forwardX,
-                work.forwardY)) {
-            return true;
-        }
         for (size_t obstacleIndex = 0;
              obstacleIndex < aircraftObstacleCount;
              obstacleIndex++) {
@@ -542,6 +537,20 @@ void LabelLayout::solve(
                 return true;
             }
         }
+        return false;
+    };
+
+    auto placementHasHardConflict = [&](const WorkItem &work, float x, float y) {
+        const LabelLayoutInput &input = *work.input;
+        if (isInsideForwardCone(
+                input,
+                x + input.width * 0.5f,
+                y + input.height * 0.5f,
+                work.forwardX,
+                work.forwardY)) {
+            return true;
+        }
+        if (placementHasAircraftConflict(work, x, y)) return true;
         for (size_t obstacleIndex = 0;
              obstacleIndex < staticObstacleCount;
              obstacleIndex++) {
@@ -562,6 +571,7 @@ void LabelLayout::solve(
         return false;
     };
 
+    bool aircraftTargetBlocked[kMaxLabels] = {};
     for (size_t i = 0; i < workCount; i++) {
         WorkItem &work = work_[i];
         State &state = *work.state;
@@ -606,11 +616,104 @@ void LabelLayout::solve(
             clampDistance
         );
         if (placementHasHardConflict(work, targetX, targetY)) {
+            aircraftTargetBlocked[i] = placementHasAircraftConflict(
+                work,
+                targetX,
+                targetY
+            );
             state.orbitTargetActive = false;
             state.orbitAngleValid = false;
             state.orbitCooldownUntilMs = 0;
             state.orbitGapCompactAfterMs = 0;
         }
+    }
+
+    // When another aircraft blocks a reserved destination, choose a new stable
+    // destination before falling back to continuous force relaxation. Repeated
+    // repulsion can otherwise overshoot the narrow equilibrium and reverse on
+    // every frame, which is especially visible after integer pixel rounding.
+    static constexpr float kSafeTargetOffsetsDeg[] = {
+        0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180
+    };
+    for (size_t i = 0; i < workCount; i++) {
+        WorkItem &work = work_[i];
+        State &state = *work.state;
+        const LabelLayoutInput &input = *work.input;
+        if (state.orbitAngleValid ||
+            (!aircraftTargetBlocked[i] &&
+             !placementHasAircraftConflict(work, work.x, work.y))) {
+            continue;
+        }
+
+        float centerX = work.x + input.width * 0.5f;
+        float centerY = work.y + input.height * 0.5f;
+        float baseAngle = atan2f(
+            centerY - input.anchorY,
+            centerX - input.anchorX
+        );
+        float maxGap = input.mustShow ? kPriorityMaxGapPx : kNormalMaxGapPx;
+        float baseGap = clampFloat(
+            symbolGapAtPosition(input, work.x, work.y),
+            kPreferredSymbolGapPx,
+            maxGap
+        );
+        float outerGap = minFloat(maxGap, maxFloat(16.0f, baseGap + 12.0f));
+        float gaps[2] = {baseGap, outerGap};
+        size_t gapCount = outerGap > baseGap + 0.5f ? 2 : 1;
+        float bestScore = 1.0e30f;
+        float bestAngle = baseAngle;
+        float bestGap = baseGap;
+        bool found = false;
+
+        for (size_t gapIndex = 0; gapIndex < gapCount; gapIndex++) {
+            for (float offsetDeg : kSafeTargetOffsetsDeg) {
+                float offset = offsetDeg * kDegreesToRadians;
+                float angle = normalizeAngle(baseAngle + offset);
+                float candidateX = 0.0f;
+                float candidateY = 0.0f;
+                float clampDistance = 0.0f;
+                positionAtDirection(
+                    input,
+                    bounds,
+                    cosf(angle),
+                    sinf(angle),
+                    gaps[gapIndex],
+                    candidateX,
+                    candidateY,
+                    clampDistance
+                );
+                if (placementHasHardConflict(work, candidateX, candidateY)) continue;
+
+                int8_t direction = offsetDeg > 0.0f ? 1 :
+                    (offsetDeg < 0.0f ? -1 : 0);
+                float score = fabsf(offsetDeg) * 0.04f +
+                    (gaps[gapIndex] - baseGap) * 0.6f +
+                    clampDistance * 80.0f;
+                if (direction != 0 && state.orbitDirection != 0 &&
+                    direction != state.orbitDirection &&
+                    deadlineActive(nowMs, state.orbitLockUntilMs)) {
+                    score += 8.0f;
+                }
+                if (score >= bestScore) continue;
+                bestScore = score;
+                bestAngle = angle;
+                bestGap = gaps[gapIndex];
+                found = true;
+            }
+        }
+        if (!found) continue;
+
+        float angleDelta = normalizeAngle(bestAngle - baseAngle);
+        state.orbitTargetAngle = bestAngle;
+        state.orbitTargetGap = bestGap;
+        state.orbitTargetActive = fabsf(angleDelta) > kOrbitArrivalAngleRad ||
+            fabsf(bestGap - baseGap) > 0.75f;
+        state.orbitAngleValid = true;
+        state.orbitDirection = angleDelta > 0.0f ? 1 :
+            (angleDelta < 0.0f ? -1 : 0);
+        state.orbitLockUntilMs = nowMs + kOrbitDirectionLockMs;
+        state.orbitCooldownUntilMs = 0;
+        state.orbitGapCompactAfterMs = 0;
     }
 
     auto updateAircraftForce = [&](WorkItem &work) {
@@ -1155,6 +1258,47 @@ void LabelLayout::solve(
             }
         }
         advanceOrbitTarget(workIndex);
+    }
+
+    if (kAllowLabelOverlap) {
+        float maxOverlap = 0.0f;
+        for (size_t i = 0; i < workCount; i++) {
+            WorkItem &work = work_[i];
+            State &state = *work.state;
+            state.x = work.x;
+            state.y = work.y;
+            state.visible = true;
+            state.conflictFrames = 0;
+            state.cleanFrames = 0;
+
+            for (size_t previous = 0; previous < i; previous++) {
+                const WorkItem &other = work_[previous];
+                maxOverlap = maxFloat(
+                    maxOverlap,
+                    rectOverlapDepth(
+                        work.x,
+                        work.y,
+                        work.input->width,
+                        work.input->height,
+                        other.x,
+                        other.y,
+                        other.input->width,
+                        other.input->height
+                    )
+                );
+            }
+
+            LabelLayoutOutput &output = outputs[work.outputIndex];
+            output.x = work.x;
+            output.y = work.y;
+            output.visible = true;
+        }
+        if (metrics != nullptr) {
+            metrics->visibleCount = workCount;
+            metrics->hiddenCount = 0;
+            metrics->maxOverlapPx = maxOverlap;
+        }
+        return;
     }
 
     // Resolve a connected overlap as one assignment so an earlier reservation
