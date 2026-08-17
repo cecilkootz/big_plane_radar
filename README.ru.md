@@ -299,7 +299,11 @@ bash build_arduino_highperf.sh
 кэш. Системный Arduino Core не заменяется. В сборке включены O2, XIP из PSRAM,
 cache line 64 байта и Octal PSRAM 80 МГц.
 
-Для разработки с системным Arduino Core используйте `bash build_arduino_cli.sh`.
+`bash build_arduino_cli.sh` собирает без шага установки и использует
+high-performance SDK, если его кэш уже создан. Скрипт печатает выбранный SDK.
+Чтобы собрать с системным Arduino Core, передайте
+`REQUIRE_HIGH_PERF=0 RGB_7B_PCLK_MHZ=14`: на стоковом ядре LCD-7B не тянет
+пиксельклок 30 МГц по умолчанию без разрывов.
 
 По умолчанию используется `LOG_LEVEL=info`: в Serial остаются только ошибки и
 важные однократные события. Для диагностики загрузки, сети, карты и времени

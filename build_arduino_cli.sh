@@ -18,19 +18,24 @@ else
   exit 1
 fi
 
-PORT="${PORT:-/dev/cu.usbmodem5AE71132621}"
+PORT="${PORT:-/dev/cu.usbmodem5B901696781}"
 UPLOAD="${UPLOAD:-0}"
 CLEAN="${CLEAN:-0}"
-BUILD_PATH="${BUILD_PATH:-$PROJECT_DIR/build/arduino}"
 DEFAULT_WIFI_SSID="${DEFAULT_WIFI_SSID:-}"
 DEFAULT_WIFI_PASSWORD="${DEFAULT_WIFI_PASSWORD:-}"
-DEFAULT_LAT="${DEFAULT_LAT:-51.507400}"
-DEFAULT_LON="${DEFAULT_LON:--0.127800}"
+DEFAULT_LAT="${DEFAULT_LAT:-27.978870429966108}"
+DEFAULT_LON="${DEFAULT_LON:--82.53492455701293}"
 DEFAULT_MAP_PROVIDER="${DEFAULT_MAP_PROVIDER:-none}"
 DEFAULT_STADIA_API_KEY="${DEFAULT_STADIA_API_KEY:-}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 RGB_BOUNCE_LINES="${RGB_BOUNCE_LINES:-10}"
-REQUIRE_HIGH_PERF="${REQUIRE_HIGH_PERF:-0}"
+RGB_7B_PCLK_MHZ="${RGB_7B_PCLK_MHZ:-}"
+HIGH_PERF_ROOT="${PLANE_RADAR_HIGH_PERF_ROOT:-$HOME/.cache/big-plane-radar/arduino-high-perf-3.2.0}"
+
+if [[ -n "$RGB_7B_PCLK_MHZ" && ! "$RGB_7B_PCLK_MHZ" =~ ^[0-9]+$ ]]; then
+  echo "RGB_7B_PCLK_MHZ must be an integer (MHz), e.g. 20." >&2
+  exit 1
+fi
 
 case "$RGB_BOUNCE_LINES" in
   10|20) ;;
@@ -40,6 +45,22 @@ case "$RGB_BOUNCE_LINES" in
     ;;
 esac
 
+# The high-perf SDK lives in its own arduino-cli data dir, so an explicit config
+# file means the caller already picked a toolchain (build_arduino_highperf.sh
+# does). Otherwise adopt an already-installed high-perf SDK rather than silently
+# building against the stock core; installing it stays the wrapper's job.
+if [[ -z "$ARDUINO_CLI_CONFIG_FILE" && "${REQUIRE_HIGH_PERF:-1}" == "1" &&
+      -f "$HIGH_PERF_ROOT/arduino-cli.yaml" ]]; then
+  ARDUINO_CLI_CONFIG_FILE="$HIGH_PERF_ROOT/arduino-cli.yaml"
+  REQUIRE_HIGH_PERF=1
+  BUILD_PATH="${BUILD_PATH:-$PROJECT_DIR/build/arduino-highperf-$RGB_BOUNCE_LINES}"
+  HIGH_PERF_AUTODETECTED=1
+fi
+
+REQUIRE_HIGH_PERF="${REQUIRE_HIGH_PERF:-0}"
+BUILD_PATH="${BUILD_PATH:-$PROJECT_DIR/build/arduino}"
+HIGH_PERF_AUTODETECTED="${HIGH_PERF_AUTODETECTED:-0}"
+
 case "$REQUIRE_HIGH_PERF" in
   0|1) ;;
   *)
@@ -47,6 +68,25 @@ case "$REQUIRE_HIGH_PERF" in
     exit 1
     ;;
 esac
+
+# display_tuning.h defaults the 7B to 30 MHz, which only holds on the high-perf
+# SDK. Fail loudly rather than shipping a stock build that tears on that panel.
+if [[ "$REQUIRE_HIGH_PERF" == "0" && -z "$RGB_7B_PCLK_MHZ" ]]; then
+  echo "Stock SDK build defaults the LCD-7B to 30 MHz, which tears." >&2
+  echo "Use 'bash build_arduino_highperf.sh', or pass RGB_7B_PCLK_MHZ=14." >&2
+  exit 1
+fi
+
+if [[ "$REQUIRE_HIGH_PERF" == "1" ]]; then
+  SDK_ORIGIN=""
+  if [[ "$HIGH_PERF_AUTODETECTED" == "1" ]]; then
+    SDK_ORIGIN=" (auto-detected)"
+  fi
+  echo "SDK: high-performance$SDK_ORIGIN $ARDUINO_CLI_CONFIG_FILE"
+else
+  echo "SDK: stock (7B pclk ${RGB_7B_PCLK_MHZ} MHz)"
+fi
+echo "Build path: $BUILD_PATH"
 
 case "$LOG_LEVEL" in
   off|0)
@@ -93,6 +133,9 @@ COMMON_FLAGS="-I$PROJECT_DIR -I$PROJECT_DIR/src -DPNG_MAX_BUFFERED_PIXELS=8322"
 CPP_FLAGS="$COMMON_FLAGS"
 CPP_FLAGS+=" -DPLANE_RADAR_LOG_LEVEL=$APP_LOG_LEVEL"
 CPP_FLAGS+=" -DPLANE_RADAR_RGB_BOUNCE_LINES=$RGB_BOUNCE_LINES"
+if [[ -n "$RGB_7B_PCLK_MHZ" ]]; then
+  CPP_FLAGS+=" -DPLANE_RADAR_RGB_7B_PCLK_HZ=$((RGB_7B_PCLK_MHZ * 1000000))"
+fi
 CPP_FLAGS+=" -DPLANE_RADAR_REQUIRE_HIGH_PERF=$REQUIRE_HIGH_PERF"
 CPP_FLAGS+=" -DDEFAULT_WIFI_SSID=$(c_define_string "$DEFAULT_WIFI_SSID")"
 CPP_FLAGS+=" -DDEFAULT_WIFI_PASSWORD=$(c_define_string "$DEFAULT_WIFI_PASSWORD")"

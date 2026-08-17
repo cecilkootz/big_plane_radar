@@ -296,7 +296,11 @@ and installs an isolated Arduino Core 3.2.0 environment under the user cache. It
 does not replace the system Arduino Core. The build enables O2, PSRAM XIP, a
 64-byte cache line, and 80 MHz Octal PSRAM.
 
-For development with the system Arduino Core, use `bash build_arduino_cli.sh`.
+`bash build_arduino_cli.sh` builds without the setup step and reuses the
+high-performance SDK when that cache already exists. It prints which SDK it
+selected. To build against the system Arduino Core instead, pass
+`REQUIRE_HIGH_PERF=0 RGB_7B_PCLK_MHZ=14` — the stock core cannot drive the
+LCD-7B at its default 30 MHz pixel clock without tearing.
 
 The default `LOG_LEVEL=info` keeps only errors and important one-time events in
 Serial. Use a debug build when diagnosing boot, networking, map loading, or frame
