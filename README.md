@@ -101,6 +101,7 @@ zoom, dimensions, PNG size, download progress, and decode time.
 ### Everyday controls
 
 - tap the radar to change its range;
+- swipe the right-hand aircraft list up or down to scroll it;
 - tap an aircraft in the right-hand list to show or hide its track;
 - long-press the screen to reopen the setup portal;
 - open [http://plane-radar.local](http://plane-radar.local) from the same Wi-Fi
@@ -193,8 +194,9 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
   their 5-degree rotation frames are precomputed in flash and alpha-blended
   directly into the RGB565 framebuffer;
 - background Wi-Fi reconnect after router/power outages;
-- touch controls: tap the radar to cycle range, tap an aircraft row to toggle
-  its track, and long press to start the setup portal;
+- touch controls: tap the radar to cycle range, swipe the aircraft list to
+  scroll it, tap an aircraft row to toggle its track, and long press to start
+  the setup portal;
 - boot setup window: hold the screen during startup to force the setup portal;
 - screenshot endpoint: `/screenshot` and `/screenshot.bmp`;
 - conservative RGB LCD settings for this panel: `13 MHz` PCLK and `800 * 10`

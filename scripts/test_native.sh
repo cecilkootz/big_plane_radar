@@ -2,7 +2,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-label-layout-tests"
+LABEL_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-label-layout-tests"
+SCROLL_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-aircraft-list-scroll-tests"
 
 c++ \
   -std=c++17 \
@@ -13,6 +14,18 @@ c++ \
   -I"$PROJECT_DIR/src" \
   "$PROJECT_DIR/tests/test_label_layout.cpp" \
   "$PROJECT_DIR/src/label_layout.cpp" \
-  -o "$OUTPUT"
+  -o "$LABEL_OUTPUT"
 
-"$OUTPUT"
+"$LABEL_OUTPUT"
+
+c++ \
+  -std=c++17 \
+  -O2 \
+  -Wall \
+  -Wextra \
+  -Werror \
+  -I"$PROJECT_DIR/src" \
+  "$PROJECT_DIR/tests/test_aircraft_list_scroll.cpp" \
+  -o "$SCROLL_OUTPUT"
+
+"$SCROLL_OUTPUT"

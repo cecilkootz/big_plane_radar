@@ -12,6 +12,7 @@
 #include <math.h>
 
 #include "aircraft_icons.h"
+#include "aircraft_list_scroll.h"
 #include "app_log.h"
 #include "build_diagnostics.h"
 #include "app_watchdog.h"
@@ -91,6 +92,8 @@ static constexpr uint32_t BOOT_SETUP_WINDOW_MS = 4000;
 static constexpr uint32_t TOUCH_LONG_PRESS_MS = 1200;
 static constexpr uint32_t TOUCH_RELEASE_DEBOUNCE_MS = 80;
 static constexpr int TOUCH_TAP_MOVE_MAX_PX = 18;
+static constexpr int TOUCH_SCROLL_START_PX = 20;
+static constexpr int TOUCH_SCROLL_ROW_STEP_PX = 36;
 static constexpr uint32_t CONFIG_HOLD_NOTICE_MS = 900;
 static constexpr uint32_t TRACK_STALE_MS = 60000;
 static constexpr uint32_t TRACK_BREAK_GAP_MS = 60000;
@@ -249,6 +252,7 @@ static RadarLabelRender radarLabels[MAX_AIRCRAFT];
 static char selectedAircraftHex[7] = {};
 static char visibleListAircraftHex[PANEL_MAX_ROWS][7] = {};
 static size_t visibleListRowCount = 0;
+static size_t aircraftListScrollOffset = 0;
 static size_t aircraftCount = 0;
 static String statusText = "BOOT";
 static String lastFetchText = "NO DATA";
@@ -275,8 +279,11 @@ static uint16_t touchDownX = 0;
 static uint16_t touchDownY = 0;
 static uint16_t touchLastX = 0;
 static uint16_t touchLastY = 0;
+static size_t touchListScrollStartOffset = 0;
 static bool longPressHandled = false;
 static bool configNoticeShown = false;
+static bool touchStartedInAircraftList = false;
+static bool touchListScrolling = false;
 
 static void lockState() {
     if (stateMutex != nullptr) {
@@ -3201,8 +3208,15 @@ static void drawAircraftList(
 
     int textWidth = PANEL_RIGHT - PANEL_TEXT_X;
     int maxRows = static_cast<int>(panelVisibleRows);
+    aircraftListScrollOffset = AircraftListScroll::clampOffset(
+        aircraftListScrollOffset,
+        itemCount,
+        panelVisibleRows
+    );
     int drawn = 0;
-    for (int idx = static_cast<int>(itemCount) - 1; idx >= 0 && drawn < maxRows; idx--) {
+    int firstIndex = static_cast<int>(itemCount) - 1 -
+        static_cast<int>(aircraftListScrollOffset);
+    for (int idx = firstIndex; idx >= 0 && drawn < maxRows; idx--) {
         const Aircraft &item = items[idx];
         int rowY = PANEL_LIST_TOP + drawn * PANEL_ROW_H;
         int iconX = PANEL_X + 20;
@@ -3273,6 +3287,25 @@ static void drawAircraftList(
         g.setTextSize(1);
         g.setTextColor(colorDim, colorBg);
         g.drawString(WiFi.status() == WL_CONNECTED ? "NO AIRCRAFT" : emptyStatus, PANEL_TEXT_X, PANEL_LIST_TOP);
+    }
+
+    size_t maxScrollOffset = AircraftListScroll::maxOffset(
+        itemCount,
+        panelVisibleRows
+    );
+    if (maxScrollOffset > 0 && panelVisibleRows > 0) {
+        int trackTop = PANEL_LIST_TOP;
+        int trackHeight = SCREEN_H - PANEL_LIST_TOP - 4;
+        int thumbHeight = std::max(
+            20,
+            static_cast<int>(trackHeight * panelVisibleRows / itemCount)
+        );
+        int thumbTravel = trackHeight - thumbHeight;
+        int thumbY = trackTop + static_cast<int>(
+            thumbTravel * aircraftListScrollOffset / maxScrollOffset
+        );
+        g.fillRect(SCREEN_W - 4, trackTop, 2, trackHeight, colorGrid);
+        g.fillRect(SCREEN_W - 5, thumbY, 3, thumbHeight, colorDim);
     }
 }
 
@@ -3578,6 +3611,27 @@ static bool handleAircraftListTap(uint16_t x, uint16_t y) {
     return true;
 }
 
+static void updateAircraftListScroll(int dragUpPixels) {
+    size_t itemCount = 0;
+    lockState();
+    itemCount = aircraftCount;
+    unlockState();
+
+    size_t newOffset = AircraftListScroll::offsetForDrag(
+        touchListScrollStartOffset,
+        dragUpPixels,
+        itemCount,
+        panelVisibleRows,
+        TOUCH_SCROLL_START_PX,
+        TOUCH_SCROLL_ROW_STEP_PX
+    );
+    if (newOffset == aircraftListScrollOffset) return;
+    aircraftListScrollOffset = newOffset;
+    lockState();
+    networkDataDirty = true;
+    unlockState();
+}
+
 static void handleTouch() {
     uint16_t x = 0;
     uint16_t y = 0;
@@ -3594,17 +3648,33 @@ static void handleTouch() {
         touchDownY = y;
         touchLastX = x;
         touchLastY = y;
+        touchListScrollStartOffset = aircraftListScrollOffset;
+        touchStartedInAircraftList = x >= PANEL_X && y >= PANEL_LIST_TOP;
+        touchListScrolling = false;
         longPressHandled = false;
     }
     if (rawDown) {
         touchLastX = x;
         touchLastY = y;
+        int movedX = abs(static_cast<int>(x) - touchDownX);
+        int dragUpPixels = static_cast<int>(touchDownY) - y;
+        int movedY = abs(dragUpPixels);
+        if (touchStartedInAircraftList &&
+            movedY >= TOUCH_SCROLL_START_PX && movedY > movedX) {
+            touchListScrolling = true;
+            configNoticeShown = false;
+        }
+        if (touchListScrolling) {
+            updateAircraftListScroll(dragUpPixels);
+        }
     }
-    if (down && !longPressHandled && now - touchDownMs >= TOUCH_LONG_PRESS_MS) {
+    if (down && !longPressHandled && !touchListScrolling &&
+        now - touchDownMs >= TOUCH_LONG_PRESS_MS) {
         longPressHandled = true;
         startPortal();
     }
-    if (down && !longPressHandled && !configNoticeShown && now - touchDownMs >= CONFIG_HOLD_NOTICE_MS) {
+    if (down && !longPressHandled && !touchListScrolling &&
+        !configNoticeShown && now - touchDownMs >= CONFIG_HOLD_NOTICE_MS) {
         configNoticeShown = true;
         setStatus("HOLD FOR SETUP");
     }
@@ -3612,7 +3682,7 @@ static void handleTouch() {
         uint32_t held = now - touchDownMs;
         int movedX = abs(static_cast<int>(touchLastX) - touchDownX);
         int movedY = abs(static_cast<int>(touchLastY) - touchDownY);
-        bool tap = !longPressHandled &&
+        bool tap = !longPressHandled && !touchListScrolling &&
             held < TOUCH_LONG_PRESS_MS &&
             movedX <= TOUCH_TAP_MOVE_MAX_PX &&
             movedY <= TOUCH_TAP_MOVE_MAX_PX;
@@ -3627,6 +3697,8 @@ static void handleTouch() {
     }
     if (!down) {
         configNoticeShown = false;
+        touchStartedInAircraftList = false;
+        touchListScrolling = false;
     }
     touchWasDown = down;
 }
