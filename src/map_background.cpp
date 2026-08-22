@@ -1,5 +1,6 @@
 #include "map_background.h"
 #include "app_log.h"
+#include "map_geometry.h"
 
 #include <HTTPClient.h>
 #include <PNGdec.h>
@@ -15,177 +16,20 @@ static constexpr char STADIA_RASTER_TILE_URL[] =
     "https://tiles-eu.stadiamaps.com/tiles/alidade_smooth_dark/%d/%d/%d.png";
 static constexpr uint32_t MAP_HTTP_TIMEOUT_MS = 20000;
 static constexpr size_t MAP_MAX_PNG_BYTES = 256 * 1024;
-static constexpr int MAP_TILE_SIZE = 256;
-static constexpr int MAP_MAX_TILE_COLUMNS = 6;
-static constexpr int MAP_MAX_TILE_ROWS = 6;
-static constexpr int MAP_MAX_SOURCE_WIDTH = MAP_MAX_TILE_COLUMNS * MAP_TILE_SIZE;
-static constexpr int MAP_MAX_SOURCE_HEIGHT = MAP_MAX_TILE_ROWS * MAP_TILE_SIZE;
 static constexpr unsigned MAP_DOWNLOAD_PROGRESS_STEPS = 5;
-static constexpr double WEB_MERCATOR_MAX_LATITUDE = 85.05112878;
-static constexpr double WEB_MERCATOR_METERS_PER_PIXEL_Z0 = 156543.03392804097;
 
 Background background;
-
-struct MapGeometry {
-    int zoom = 0;
-    double centerPixelX = 0;
-    double centerPixelY = 0;
-    double sourcePixelsPerDestinationPixel = 1;
-    double worldPixelSize = 0;
-    int64_t tileMinX = 0;
-    int64_t tileMaxX = 0;
-    int tileMinY = 0;
-    int tileMaxY = 0;
-    int tileColumns = 0;
-    int tileRows = 0;
-    int sourceWidth = 0;
-    int sourceHeight = 0;
-};
-
-struct PixelSample {
-    int64_t first = 0;
-    int64_t second = 0;
-    uint16_t weight = 0;
-};
-
-struct BilinearSample {
-    uint16_t first = 0;
-    uint16_t second = 0;
-    uint16_t weight = 0;
-};
 
 struct TileDecodeContext {
     PNG *decoder = nullptr;
     uint16_t *strip = nullptr;
     uint16_t *line = nullptr;
     int stripWidth = 0;
+    // Source-pixel column the tile's left edge lands on. The strip starts at the
+    // first sampled pixel rather than a tile boundary, so the leading tile
+    // starts left of the strip and the trailing one runs past its end.
     int destinationX = 0;
 };
-
-static int64_t floorDiv(int64_t value, int64_t divisor) {
-    if (value >= 0) return value / divisor;
-    return -((-value + divisor - 1) / divisor);
-}
-
-static int wrapTileX(int64_t tileX, int zoom) {
-    int64_t tileCount = 1LL << zoom;
-    int64_t wrapped = tileX % tileCount;
-    if (wrapped < 0) wrapped += tileCount;
-    return static_cast<int>(wrapped);
-}
-
-static PixelSample pixelSample(double coordinate) {
-    double firstValue = floor(coordinate);
-    double fraction = coordinate - firstValue;
-    int weight = static_cast<int>(lround(fraction * 256.0));
-    int64_t first = static_cast<int64_t>(firstValue);
-    if (weight >= 256) {
-        first++;
-        weight = 0;
-    }
-
-    PixelSample result;
-    result.first = first;
-    result.second = weight == 0 ? first : first + 1;
-    result.weight = static_cast<uint16_t>(weight);
-    return result;
-}
-
-static double sourceCoordinate(
-    double centerPixel,
-    int destinationIndex,
-    int destinationSize,
-    double scale
-) {
-    return centerPixel +
-        (destinationIndex + 0.5 - destinationSize / 2.0) * scale - 0.5;
-}
-
-static double clampSourceY(double coordinate, double worldPixelSize) {
-    return std::max(0.0, std::min(worldPixelSize - 1.0, coordinate));
-}
-
-static MapGeometry mapGeometry(
-    double centerLat,
-    double centerLon,
-    float outerKm,
-    int radarRadius,
-    int destinationWidth,
-    int destinationHeight
-) {
-    MapGeometry result;
-    double latitude = std::max(
-        -WEB_MERCATOR_MAX_LATITUDE,
-        std::min(WEB_MERCATOR_MAX_LATITUDE, centerLat)
-    );
-    double longitude = fmod(centerLon + 180.0, 360.0);
-    if (longitude < 0) longitude += 360.0;
-    longitude -= 180.0;
-
-    double metersPerDestinationPixel = (outerKm * 1000.0) / radarRadius;
-    double latitudeScale = std::max(0.01, cos(latitude * DEG_TO_RAD));
-    double rawZoom = log2(
-        (WEB_MERCATOR_METERS_PER_PIXEL_Z0 * latitudeScale) /
-        metersPerDestinationPixel
-    );
-    result.zoom = std::max(0, std::min(20, static_cast<int>(ceil(rawZoom))));
-    result.worldPixelSize = ldexp(static_cast<double>(MAP_TILE_SIZE), result.zoom);
-
-    double latitudeRadians = latitude * DEG_TO_RAD;
-    double sinLatitude = sin(latitudeRadians);
-    result.centerPixelX = ((longitude + 180.0) / 360.0) * result.worldPixelSize;
-    result.centerPixelY =
-        (0.5 - log((1.0 + sinLatitude) / (1.0 - sinLatitude)) / (4.0 * PI)) *
-        result.worldPixelSize;
-
-    double metersPerSourcePixel =
-        (WEB_MERCATOR_METERS_PER_PIXEL_Z0 * latitudeScale) /
-        static_cast<double>(1UL << result.zoom);
-    result.sourcePixelsPerDestinationPixel =
-        metersPerDestinationPixel / metersPerSourcePixel;
-    result.sourceWidth = static_cast<int>(ceil(
-        destinationWidth * result.sourcePixelsPerDestinationPixel
-    ));
-    result.sourceHeight = static_cast<int>(ceil(
-        destinationHeight * result.sourcePixelsPerDestinationPixel
-    ));
-
-    PixelSample firstX = pixelSample(sourceCoordinate(
-        result.centerPixelX,
-        0,
-        destinationWidth,
-        result.sourcePixelsPerDestinationPixel
-    ));
-    PixelSample lastX = pixelSample(sourceCoordinate(
-        result.centerPixelX,
-        destinationWidth - 1,
-        destinationWidth,
-        result.sourcePixelsPerDestinationPixel
-    ));
-    PixelSample firstY = pixelSample(clampSourceY(sourceCoordinate(
-        result.centerPixelY,
-        0,
-        destinationHeight,
-        result.sourcePixelsPerDestinationPixel
-    ), result.worldPixelSize));
-    PixelSample lastY = pixelSample(clampSourceY(sourceCoordinate(
-        result.centerPixelY,
-        destinationHeight - 1,
-        destinationHeight,
-        result.sourcePixelsPerDestinationPixel
-    ), result.worldPixelSize));
-
-    result.tileMinX = floorDiv(firstX.first, MAP_TILE_SIZE);
-    result.tileMaxX = floorDiv(lastX.second, MAP_TILE_SIZE);
-    result.tileMinY = static_cast<int>(floorDiv(firstY.first, MAP_TILE_SIZE));
-    result.tileMaxY = static_cast<int>(floorDiv(lastY.second, MAP_TILE_SIZE));
-    int worldTileCount = 1 << result.zoom;
-    result.tileMinY = std::max(0, std::min(worldTileCount - 1, result.tileMinY));
-    result.tileMaxY = std::max(0, std::min(worldTileCount - 1, result.tileMaxY));
-    result.tileColumns = static_cast<int>(result.tileMaxX - result.tileMinX + 1);
-    result.tileRows = result.tileMaxY - result.tileMinY + 1;
-    return result;
-}
 
 static uint16_t interpolateRgb565(uint16_t first, uint16_t second, uint16_t weight) {
     if (weight == 0 || first == second) return first;
@@ -316,6 +160,13 @@ static int drawTilePngLine(PNGDRAW *draw) {
         return 0;
     }
 
+    int clipLeft = std::max(0, -context->destinationX);
+    int clipRight = std::min(
+        MAP_TILE_SIZE,
+        context->stripWidth - context->destinationX
+    );
+    if (clipLeft >= clipRight) return 1;
+
     context->decoder->getLineAsRGB565(
         draw,
         context->line,
@@ -325,9 +176,9 @@ static int drawTilePngLine(PNGDRAW *draw) {
     memcpy(
         context->strip +
             static_cast<size_t>(draw->y + 1) * context->stripWidth +
-            context->destinationX,
-        context->line,
-        MAP_TILE_SIZE * sizeof(uint16_t)
+            context->destinationX + clipLeft,
+        context->line + clipLeft,
+        static_cast<size_t>(clipRight - clipLeft) * sizeof(uint16_t)
     );
     return 1;
 }
@@ -612,16 +463,18 @@ bool Background::fetchStadia(
     progress.tileColumns = geometry.tileColumns;
     progress.tileRows = geometry.tileRows;
 
-    if (geometry.sourceWidth > MAP_MAX_SOURCE_WIDTH ||
-        geometry.sourceHeight > MAP_MAX_SOURCE_HEIGHT ||
+    int stripCapacity = stripCapacityWidth(_width);
+    if (geometry.stripWidth <= 0 || geometry.stripWidth > stripCapacity ||
         geometry.tileColumns <= 0 || geometry.tileRows <= 0 ||
         geometry.tileColumns > MAP_MAX_TILE_COLUMNS ||
         geometry.tileRows > MAP_MAX_TILE_ROWS) {
-        RADAR_LOGE("[map] invalid XYZ geometry source=%dx%d tiles=%dx%d\n",
+        RADAR_LOGE("[map] invalid XYZ geometry source=%dx%d tiles=%dx%d strip=%d/%d\n",
                    geometry.sourceWidth,
                    geometry.sourceHeight,
                    geometry.tileColumns,
-                   geometry.tileRows);
+                   geometry.tileRows,
+                   geometry.stripWidth,
+                   stripCapacity);
         emitProgress(
             progress,
             LoadPhase::Error,
@@ -632,12 +485,12 @@ bool Background::fetchStadia(
         return false;
     }
 
-    int stripWidth = geometry.tileColumns * MAP_TILE_SIZE;
-    // Allocate every strip at the fixed maximum size. A uniformly sized buffer
-    // means each freed strip leaves a slot the next view reuses exactly, avoiding
-    // the PSRAM fragmentation that made a later view's malloc fail while memory
-    // was still free. Processing still uses stripWidth for the actual tile span.
-    size_t stripPixels = static_cast<size_t>(MAP_MAX_SOURCE_WIDTH) * (MAP_TILE_SIZE + 1);
+    int stripWidth = geometry.stripWidth;
+    // Allocate every strip at the fixed capacity. A uniformly sized buffer means
+    // each freed strip leaves a slot the next view reuses exactly, avoiding the
+    // PSRAM fragmentation that made a later view's malloc fail while memory was
+    // still free. Processing still uses stripWidth for the sampled span.
+    size_t stripPixels = static_cast<size_t>(stripCapacity) * (MAP_TILE_SIZE + 1);
     auto *strip = static_cast<uint16_t *>(heap_caps_malloc(
         stripPixels * sizeof(uint16_t),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
@@ -666,7 +519,7 @@ bool Background::fetchStadia(
         return false;
     }
 
-    int64_t stripOriginX = geometry.tileMinX * MAP_TILE_SIZE;
+    int64_t stripOriginX = geometry.stripOriginX;
     bool samplesValid = true;
     for (int x = 0; x < _width; x++) {
         PixelSample worldX = pixelSample(sourceCoordinate(
@@ -737,7 +590,9 @@ bool Background::fetchStadia(
                 apiKey,
                 strip,
                 stripWidth,
-                tileColumn * MAP_TILE_SIZE,
+                static_cast<int>(
+                    (geometry.tileMinX + tileColumn) * MAP_TILE_SIZE - stripOriginX
+                ),
                 progress,
                 progressCallback,
                 progressContext
