@@ -183,10 +183,14 @@ static int drawTilePngLine(PNGDRAW *draw) {
     return 1;
 }
 
-// Dumps what the tile actually is when the decoder rejects it: a complete PNG
+// The boot screen is the only diagnostic most users see, so the decode failure
+// detail goes there as well as to the serial log.
+static char tileDecodeErrorDetail[48] = {};
+
+// Reports what the tile actually is when the decoder rejects it: a complete PNG
 // that fails to inflate points at the decoder, a body without a trailing IEND
 // points at the transfer.
-static void logTileDecodeFailure(
+static void describeTileDecodeFailure(
     int result,
     const uint8_t *pngData,
     size_t pngSize,
@@ -214,6 +218,18 @@ static void logTileDecodeFailure(
         colorType = pngData[25];
         interlace = pngData[28];
     }
+    snprintf(
+        tileDecodeErrorDetail,
+        sizeof(tileDecodeErrorDetail),
+        "PNG DECODE C%d SIG%d END%d %uX%u D%u T%u",
+        result,
+        hasSignature ? 1 : 0,
+        hasEnd ? 1 : 0,
+        width,
+        height,
+        depth,
+        colorType
+    );
     RADAR_LOGE(
         "[map] tile PNG decode failed code=%d z=%d x=%d y=%d bytes=%u "
         "sig=%d iend=%d ihdr=%ux%u depth=%u color=%u interlace=%u "
@@ -288,7 +304,7 @@ static bool decodeTilePng(
     heap_caps_free(decoderStorage);
 
     if (result != PNG_SUCCESS) {
-        logTileDecodeFailure(
+        describeTileDecodeFailure(
             result, pngData, pngSize, zoom, tileX, tileY, stripWidth, destinationX
         );
         return false;
@@ -375,7 +391,13 @@ static bool downloadTile(
     heap_caps_free(pngData);
     progress.decodeMs += millis() - startedMs;
     if (!decoded) {
-        emitProgress(progress, LoadPhase::Error, callback, callbackContext, "PNG DECODE FAILED");
+        emitProgress(
+            progress,
+            LoadPhase::Error,
+            callback,
+            callbackContext,
+            tileDecodeErrorDetail[0] != '\0' ? tileDecodeErrorDetail : "PNG DECODE FAILED"
+        );
         return false;
     }
     return true;
