@@ -489,6 +489,28 @@ bool Canvas::readTouch(uint16_t *x, uint16_t *y) {
     return true;
 }
 
+bool Canvas::setBacklight(bool on) {
+    if (_model == Model::TouchLcd7B) {
+        constexpr uint8_t BACKLIGHT = 1U << 2;
+        uint8_t state = lcd7bOutputState;
+        if (on) {
+            state |= BACKLIGHT;
+        } else {
+            state = static_cast<uint8_t>(state & ~BACKLIGHT);
+        }
+        if (!write7BRegisterDriver(0x03, state)) {
+            return false;
+        }
+        lcd7bOutputState = state;
+        return true;
+    }
+    auto *backlight = board != nullptr ? board->getBacklight() : nullptr;
+    if (backlight == nullptr) {
+        return false;
+    }
+    return on ? backlight->on() : backlight->off();
+}
+
 const uint16_t *Canvas::displayedFrameBuffer() const {
     if (_usingDriverFrameBuffers) {
         return _driverFb[_drawFbIndex ^ 1];
