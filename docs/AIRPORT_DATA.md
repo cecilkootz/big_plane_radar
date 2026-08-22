@@ -39,19 +39,36 @@ number can return a route the aircraft is not flying. Observed case: `DAL338`
 returned `New York -> San Diego` while the aircraft was descending over Tampa,
 1411 km from that corridor, on a Seattle to Fort Lauderdale flight.
 
-Each accepted response is therefore checked against the live position. The
-firmware reads the origin and destination coordinates the response already
-carries, measures the aircraft's distance to the great-circle corridor between
-them, and discards the route beyond 500 km. Distance clamps to the nearer
-airport off the ends of the segment, so departures and arrival holds are not
-affected. Ordinary routing deviation stays well inside the limit: a JFK to SAN
-flight over Denver measures 312 km.
+Airport coordinates come from the compiled-in OurAirports catalog, resolved by
+the ICAO or IATA code in the response; the coordinates ADSBdb returns are used
+only for airports outside the catalog. A response that omits or misstates them
+therefore cannot disable or skew the check.
 
-A discarded route shows no route line rather than a wrong one, and is not
-retried while the callsign stays cached. The check is skipped when the response
-omits coordinates or the aircraft has no position, so missing data never hides a
-good route. The trade-off is that a genuine diversion far off its filed corridor
-is also suppressed.
+Each accepted route is then judged against every position fix, not once at
+lookup time:
+
+- A position more than 500 km from the great-circle corridor between the
+  airports rejects the route immediately. Distance clamps to the nearer airport
+  off the ends of the segment, so departures and arrival holds are not
+  affected, and ordinary routing deviation stays well inside the limit: a JFK
+  to SAN flight over Denver measures 312 km.
+- A track pointing more than 120 degrees away from the claimed destination on
+  three consecutive fixes rejects a route the corridor check cannot catch: the
+  reversed or wrong leg of the same city pair. The track is ignored within
+  150 km of either airport, where terminal maneuvering points anywhere, and
+  below 80 knots.
+- Three consecutive fixes well inside the corridor lift a rejection, so one
+  glitched position cannot suppress a good route for the rest of the flight.
+
+A rejected route shows no route line rather than a wrong one. An aircraft with
+no position yet keeps its route until fixes arrive to judge it, so missing data
+never hides a good route. The trade-off is that a genuine diversion far off its
+filed corridor is also suppressed.
+
+Lookup failures are split by kind: a definitive no-data answer is not retried
+for 10 minutes, while a timeout, rate limit, or truncated response retries
+after 15 seconds — within the cache entry's lifetime, so a transient network
+error no longer hides a route for the whole overflight.
 
 Route text is normalized to the display's ASCII character set. Common Latin
 accents are transliterated. Before drawing, both city names are measured with the
@@ -145,4 +162,5 @@ municipality names and the cities were not yet present in the RAM cache.
 
 If an aircraft shows no route line at all, ADSBdb either had no entry for the
 callsign or returned one the plausibility check rejected. Build with
-`LOG_LEVEL=debug` and look for `[route] ... rejected=1` to tell the two apart.
+`LOG_LEVEL=debug` and look for `[route] ... rejected` to tell the two apart; a
+later `restored` line means the rejection healed.
