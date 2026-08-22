@@ -183,12 +183,69 @@ static int drawTilePngLine(PNGDRAW *draw) {
     return 1;
 }
 
+// Dumps what the tile actually is when the decoder rejects it: a complete PNG
+// that fails to inflate points at the decoder, a body without a trailing IEND
+// points at the transfer.
+static void logTileDecodeFailure(
+    int result,
+    const uint8_t *pngData,
+    size_t pngSize,
+    int zoom,
+    int tileX,
+    int tileY,
+    int stripWidth,
+    int destinationX
+) {
+    bool hasSignature = pngSize >= 8 &&
+        memcmp(pngData, "\x89PNG\r\n\x1a\n", 8) == 0;
+    bool hasEnd = pngSize >= 8 &&
+        memcmp(pngData + pngSize - 8, "\x00\x00\x00\x00IEND", 8) == 0;
+    unsigned width = 0;
+    unsigned height = 0;
+    unsigned depth = 0;
+    unsigned colorType = 0;
+    unsigned interlace = 0;
+    if (hasSignature && pngSize >= 33) {
+        for (int i = 0; i < 4; i++) {
+            width = (width << 8) | pngData[16 + i];
+            height = (height << 8) | pngData[20 + i];
+        }
+        depth = pngData[24];
+        colorType = pngData[25];
+        interlace = pngData[28];
+    }
+    RADAR_LOGE(
+        "[map] tile PNG decode failed code=%d z=%d x=%d y=%d bytes=%u "
+        "sig=%d iend=%d ihdr=%ux%u depth=%u color=%u interlace=%u "
+        "strip=%d destx=%d free_psram=%u largest_psram=%u\n",
+        result,
+        zoom,
+        tileX,
+        tileY,
+        static_cast<unsigned>(pngSize),
+        hasSignature ? 1 : 0,
+        hasEnd ? 1 : 0,
+        width,
+        height,
+        depth,
+        colorType,
+        interlace,
+        stripWidth,
+        destinationX,
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM))
+    );
+}
+
 static bool decodeTilePng(
     uint8_t *pngData,
     size_t pngSize,
     uint16_t *strip,
     int stripWidth,
-    int destinationX
+    int destinationX,
+    int zoom,
+    int tileX,
+    int tileY
 ) {
     void *decoderStorage = heap_caps_calloc(
         1,
@@ -231,7 +288,9 @@ static bool decodeTilePng(
     heap_caps_free(decoderStorage);
 
     if (result != PNG_SUCCESS) {
-        RADAR_LOGE("[map] tile PNG decode failed code=%d\n", result);
+        logTileDecodeFailure(
+            result, pngData, pngSize, zoom, tileX, tileY, stripWidth, destinationX
+        );
         return false;
     }
     return true;
@@ -308,7 +367,10 @@ static bool downloadTile(
         pngSize,
         strip,
         stripWidth,
-        destinationX
+        destinationX,
+        geometry.zoom,
+        tileX,
+        tileY
     );
     heap_caps_free(pngData);
     progress.decodeMs += millis() - startedMs;
