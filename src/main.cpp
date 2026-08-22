@@ -17,6 +17,7 @@
 #include "build_diagnostics.h"
 #include "app_watchdog.h"
 #include "airport_catalog.h"
+#include "battery_gauge.h"
 #include "label_layout.h"
 #include "map_background.h"
 #include "panel_display.h"
@@ -84,7 +85,13 @@ static constexpr uint16_t AIRPORT_RADIUS_MAX_KM = 500;
 static constexpr uint32_t WIFI_CONNECT_ATTEMPT_MS = 15000;
 static constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 12000;
 static constexpr uint32_t ADSB_FETCH_INTERVAL_MS = 5000;
+static constexpr uint32_t ADSB_FETCH_ON_BATTERY_INTERVAL_MS = 15000;
 static constexpr uint32_t RADAR_DRAW_INTERVAL_MS = 0;
+static constexpr uint32_t RADAR_DRAW_ON_BATTERY_INTERVAL_MS = 250;
+static constexpr uint32_t BATTERY_SAMPLE_INTERVAL_MS = 2000;
+static constexpr uint32_t BATTERY_PRIME_SAMPLE_INTERVAL_MS = 250;
+static constexpr uint8_t BACKLIGHT_EXTERNAL_PERCENT = 100;
+static constexpr uint8_t BACKLIGHT_ON_BATTERY_PERCENT = 60;
 static constexpr uint32_t AIRCRAFT_EXTRAPOLATE_MAX_MS = 30000;
 static constexpr uint32_t ROUTE_LOOKUP_INTERVAL_MS = 5000;
 static constexpr uint32_t ROUTE_LOOKUP_RETRY_MS = 600000;
@@ -280,6 +287,11 @@ static StaticSemaphore_t stateMutexStorage;
 static SemaphoreHandle_t stateMutex = nullptr;
 static TaskHandle_t networkTaskHandle = nullptr;
 static volatile bool networkDataDirty = false;
+static BatteryGauge::PowerStateTracker batteryTracker;
+static volatile bool runningOnBattery = false;
+static bool batteryStatusValid = false;
+static int batteryDisplayPercent = -1;
+static uint32_t lastBatterySampleMs = 0;
 static bool touchWasDown = false;
 static uint32_t touchDownMs = 0;
 static uint32_t touchLastContactMs = 0;
@@ -3237,6 +3249,38 @@ static void appendTokenIfFits(
 }
 
 template <typename Gfx>
+static void drawBatteryIndicator(Gfx &g) {
+    if (!batteryStatusValid) return;
+    int percent = batteryDisplayPercent;
+    uint16_t level = percent <= 15
+        ? colorPlane
+        : (percent <= 30 ? colorWarn : colorDim);
+    int x = PANEL_X + 12;
+    int y = 9;
+    int w = 26;
+    int h = 14;
+    g.fillRect(x, y, w, 2, colorDim);
+    g.fillRect(x, y + h - 2, w, 2, colorDim);
+    g.fillRect(x, y, 2, h, colorDim);
+    g.fillRect(x + w - 2, y, 2, h, colorDim);
+    g.fillRect(x + w, y + 4, 3, h - 8, colorDim);
+    int fillWidth = (w - 8) * percent / 100;
+    if (fillWidth > 0) {
+        g.fillRect(x + 4, y + 4, fillWidth, h - 8, level);
+    }
+    if (!runningOnBattery) {
+        g.fillRect(x + 9, y + 6, 8, 2, colorText);
+        g.fillRect(x + 12, y + 3, 2, 8, colorText);
+    }
+    char percentText[8];
+    snprintf(percentText, sizeof(percentText), "%d", percent);
+    g.setTextDatum(textdatum_t::top_left);
+    g.setTextSize(2);
+    g.setTextColor(level, colorBg);
+    g.drawString(percentText, x + w + 11, 10);
+}
+
+template <typename Gfx>
 static void drawAircraftList(
     Gfx &g,
     const Aircraft *items,
@@ -3257,6 +3301,7 @@ static void drawAircraftList(
     char rangeTitle[24];
     snprintf(rangeTitle, sizeof(rangeTitle), "RANGE %s", rangeLabel());
     g.drawString(rangeTitle, PANEL_RIGHT, 10);
+    drawBatteryIndicator(g);
 
     int textWidth = PANEL_RIGHT - PANEL_TEXT_X;
     int maxRows = static_cast<int>(panelVisibleRows);
@@ -3765,7 +3810,55 @@ static bool shouldDrawRadarFrame(uint32_t now) {
     uint32_t previousDrawMs = lastDrawMs;
     unlockState();
 
-    return dirty || (hasAircraft && now - previousDrawMs >= RADAR_DRAW_INTERVAL_MS);
+    uint32_t drawInterval = runningOnBattery
+        ? RADAR_DRAW_ON_BATTERY_INTERVAL_MS
+        : RADAR_DRAW_INTERVAL_MS;
+    return dirty || (hasAircraft && now - previousDrawMs >= drawInterval);
+}
+
+static void serviceBatteryMonitor(uint32_t now) {
+    if (!screen.supportsBatteryTelemetry()) return;
+    uint32_t sampleInterval = batteryTracker.primed()
+        ? BATTERY_SAMPLE_INTERVAL_MS
+        : BATTERY_PRIME_SAMPLE_INTERVAL_MS;
+    if (lastBatterySampleMs != 0 && now - lastBatterySampleMs < sampleInterval) {
+        return;
+    }
+    lastBatterySampleMs = now;
+
+    uint16_t counts = 0;
+    if (!screen.readBatteryAdcCounts(&counts)) return;
+    batteryTracker.addSample(BatteryGauge::voltsFromAdcCounts(counts));
+    if (!batteryTracker.primed()) return;
+
+    bool wasValid = batteryStatusValid;
+    bool wasOnBattery = runningOnBattery;
+    int previousPercent = batteryDisplayPercent;
+    batteryStatusValid = true;
+    bool onBattery = batteryTracker.onBattery();
+    batteryDisplayPercent = batteryTracker.displayPercent();
+
+    if (!wasValid || onBattery != wasOnBattery) {
+        runningOnBattery = onBattery;
+        screen.setBacklightBrightnessPercent(
+            onBattery ? BACKLIGHT_ON_BATTERY_PERCENT : BACKLIGHT_EXTERNAL_PERCENT
+        );
+        RADAR_LOGI(
+            "[power] %s v=%.2f soc=%d\n",
+            onBattery ? "on battery" : "external power",
+            batteryTracker.filteredVolts(),
+            batteryDisplayPercent
+        );
+    }
+    if (!wasValid ||
+        onBattery != wasOnBattery ||
+        batteryDisplayPercent != previousPercent) {
+        lockState();
+        if (!portalActive) {
+            networkDataDirty = true;
+        }
+        unlockState();
+    }
 }
 
 static void networkTaskMain(void *) {
@@ -3784,7 +3877,10 @@ static void networkTaskMain(void *) {
                 fetchNow = true;
             }
             unlockState();
-            if (fetchNow || now - lastFetchMs >= ADSB_FETCH_INTERVAL_MS) {
+            uint32_t fetchInterval = runningOnBattery
+                ? ADSB_FETCH_ON_BATTERY_INTERVAL_MS
+                : ADSB_FETCH_INTERVAL_MS;
+            if (fetchNow || now - lastFetchMs >= fetchInterval) {
                 fetchAdsb();
                 lastFetchMs = millis();
             }
@@ -4143,6 +4239,7 @@ void loop() {
     handleTouch();
 
     uint32_t now = millis();
+    serviceBatteryMonitor(now);
     if (shouldDrawRadarFrame(now)) {
         drawRadar();
     }
