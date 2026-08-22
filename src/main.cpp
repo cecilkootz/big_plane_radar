@@ -17,6 +17,7 @@
 #include "build_diagnostics.h"
 #include "app_watchdog.h"
 #include "airport_catalog.h"
+#include "ha_mqtt.h"
 #include "label_layout.h"
 #include "map_background.h"
 #include "panel_display.h"
@@ -97,6 +98,7 @@ static constexpr int TOUCH_TAP_MOVE_MAX_PX = 18;
 static constexpr int TOUCH_SCROLL_START_PX = 20;
 static constexpr int TOUCH_SCROLL_ROW_STEP_PX = 36;
 static constexpr uint32_t CONFIG_HOLD_NOTICE_MS = 900;
+static constexpr uint32_t MQTT_STATUS_INTERVAL_MS = 60000;
 static constexpr uint32_t TRACK_STALE_MS = 60000;
 static constexpr uint32_t TRACK_BREAK_GAP_MS = 60000;
 static constexpr uint32_t TRACK_SELECTION_MISSING_MS = 15000;
@@ -154,6 +156,11 @@ struct AppConfig {
         : MapProvider::None;
     String stadiaApiKey = DEFAULT_STADIA_API_KEY;
     uint8_t mapBrightness = MAP_BRIGHTNESS_DEFAULT;
+    bool mqttEnabled = false;
+    String mqttHost;
+    uint16_t mqttPort = 1883;
+    String mqttUser;
+    String mqttPass;
     bool configured = false;
 };
 
@@ -292,6 +299,12 @@ static bool longPressHandled = false;
 static bool configNoticeShown = false;
 static bool touchStartedInAircraftList = false;
 static bool touchListScrolling = false;
+static volatile uint8_t backlightTarget = 1;
+static bool backlightOn = true;
+static bool backlightWakeAwaitingRelease = false;
+static volatile bool mqttStatusDirty = false;
+static volatile bool mapBrightnessReloadPending = false;
+static uint32_t lastMqttStatusMs = 0;
 
 static void lockState() {
     if (stateMutex != nullptr) {
@@ -612,6 +625,7 @@ static const RangePreset ranges[] = {
 };
 static constexpr size_t RANGE_COUNT = sizeof(ranges) / sizeof(ranges[0]);
 static size_t rangeIndex = 1;
+static const char *mqttRangeOptions[RANGE_COUNT];
 
 static uint16_t colorBg;
 static uint16_t colorGrid;
@@ -1305,6 +1319,11 @@ static void loadConfig() {
         static_cast<int>(MAP_BRIGHTNESS_MIN),
         std::min(100, static_cast<int>(prefs.getUChar("mapBright", MAP_BRIGHTNESS_DEFAULT)))
     ));
+    config.mqttEnabled = prefs.getBool("mqttEn", false);
+    config.mqttHost = prefs.getString("mqttHost", "");
+    config.mqttPort = prefs.getUShort("mqttPort", 1883);
+    config.mqttUser = prefs.getString("mqttUser", "");
+    config.mqttPass = prefs.getString("mqttPass", "");
     config.configured = prefs.getBool("configured", config.ssid.length() > 0);
     rangeIndex = std::min<size_t>(prefs.getUChar("range", 1), RANGE_COUNT - 1);
 }
@@ -1328,12 +1347,72 @@ static void saveConfig() {
     prefs.putUChar("map", static_cast<uint8_t>(config.mapProvider));
     prefs.putString("stadiaKey", config.stadiaApiKey);
     prefs.putUChar("mapBright", config.mapBrightness);
+    prefs.putBool("mqttEn", config.mqttEnabled);
+    prefs.putString("mqttHost", config.mqttHost);
+    prefs.putUShort("mqttPort", config.mqttPort);
+    prefs.putString("mqttUser", config.mqttUser);
+    prefs.putString("mqttPass", config.mqttPass);
     prefs.putBool("configured", config.ssid.length() > 0);
     config.configured = config.ssid.length() > 0;
 }
 
 static void saveRange() {
     prefs.putUChar("range", static_cast<uint8_t>(rangeIndex));
+}
+
+// Runs on the MQTT task; mutate shared state under the lock and leave
+// hardware work to the owning tasks.
+static void handleMqttCommand(HaMqtt::Command command, const char *value) {
+    switch (command) {
+    case HaMqtt::Command::Range:
+        for (size_t i = 0; i < RANGE_COUNT; i++) {
+            if (strcmp(value, ranges[i].kmLabel) != 0 &&
+                strcmp(value, ranges[i].miLabel) != 0) {
+                continue;
+            }
+            lockState();
+            bool changed = rangeIndex != i;
+            if (changed) {
+                rangeIndex = i;
+                forceAdsbFetch = true;
+                networkDataDirty = true;
+            }
+            unlockState();
+            if (changed) {
+                saveRange();
+            }
+            mqttStatusDirty = true;
+            break;
+        }
+        break;
+    case HaMqtt::Command::MapBrightness: {
+        long requested = strtol(value, nullptr, 10);
+        if (requested < MAP_BRIGHTNESS_MIN || requested > 100) {
+            break;
+        }
+        uint8_t brightness = static_cast<uint8_t>(requested);
+        lockState();
+        bool changed = config.mapBrightness != brightness;
+        if (changed) {
+            config.mapBrightness = brightness;
+            saveConfig();
+        }
+        bool wantReload = changed && config.mapProvider == MapProvider::Stadia;
+        unlockState();
+        if (wantReload) {
+            mapBrightnessReloadPending = true;
+        }
+        mqttStatusDirty = true;
+        break;
+    }
+    case HaMqtt::Command::Display:
+        if (strcmp(value, "ON") == 0) {
+            backlightTarget = 1;
+        } else if (strcmp(value, "OFF") == 0) {
+            backlightTarget = 0;
+        }
+        break;
+    }
 }
 
 static void drawStatusScreen(const String &title, const String &body) {
@@ -1402,7 +1481,7 @@ static void handleRoot() {
     );
 
     String body;
-    body.reserve(13000);
+    body.reserve(14000);
     body += F("<!doctype html><html><head><meta charset='utf-8'>");
     body += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
     body += F("<title>Plane Radar Setup</title>");
@@ -1514,6 +1593,19 @@ static void handleRoot() {
     body += htmlEscape(config.stadiaApiKey);
     body += F("'>");
     body += F("<small>The radar continues without a map if this is empty or the map request fails.</small></section>");
+
+    body += F("<section><h2>Home Assistant</h2><label class='check'><input type='checkbox' name='mqtt' ");
+    if (config.mqttEnabled) body += F("checked");
+    body += F(">Publish to MQTT</label>");
+    body += F("<div class='grid'><div><label class='field'>Broker host</label><input name='mqtt_host' placeholder='homeassistant.local' value='");
+    body += htmlEscape(config.mqttHost);
+    body += F("'></div><div><label class='field'>Broker port</label><input name='mqtt_port' type='number' min='1' max='65535' value='");
+    body += String(config.mqttPort);
+    body += F("'></div></div><label class='field'>MQTT username</label><input name='mqtt_user' value='");
+    body += htmlEscape(config.mqttUser);
+    body += F("'><label class='field'>MQTT password</label><input name='mqtt_pass' type='password' value='");
+    body += htmlEscape(config.mqttPass);
+    body += F("'><small>Adds aircraft sensors plus range, map brightness, and display controls to Home Assistant via MQTT discovery. Requires an MQTT broker, for example the Mosquitto add-on.</small></section>");
     body += F("<button class='save' type='submit'>Save and reboot</button></form>");
     body += F("<p><a href='/screenshot.bmp'>Download current screen BMP</a></p>");
     body += F("<p><small>Tap radar: range preset. Tap an aircraft row: toggle its track. Long press: setup portal. Range is saved.</small></p>");
@@ -1629,6 +1721,17 @@ static void handleSave() {
         static_cast<int>(MAP_BRIGHTNESS_MIN),
         std::min(100, requestedMapBrightness)
     ));
+    bool mqttEnabled = server.hasArg("mqtt");
+    String mqttHost = server.arg("mqtt_host");
+    mqttHost.trim();
+    long requestedMqttPort = server.hasArg("mqtt_port")
+        ? server.arg("mqtt_port").toInt()
+        : config.mqttPort;
+    uint16_t mqttPort = requestedMqttPort >= 1 && requestedMqttPort <= 65535
+        ? static_cast<uint16_t>(requestedMqttPort)
+        : 1883;
+    String mqttUser = server.arg("mqtt_user");
+    String mqttPass = server.arg("mqtt_pass");
 
     lockState();
     config.ssid = ssid;
@@ -1649,6 +1752,11 @@ static void handleSave() {
     config.mapProvider = mapProvider;
     config.stadiaApiKey = stadiaApiKey;
     config.mapBrightness = mapBrightness;
+    config.mqttEnabled = mqttEnabled;
+    config.mqttHost = mqttHost;
+    config.mqttPort = mqttPort;
+    config.mqttUser = mqttUser;
+    config.mqttPass = mqttPass;
     saveConfig();
     unlockState();
     server.send(200, "text/html", "<html><body><h1>Saved</h1><p>Rebooting...</p></body></html>");
@@ -2630,6 +2738,7 @@ static bool fetchAdsb() {
     size_t fetchedCount = 0;
     JsonArray ac = doc["ac"].as<JsonArray>();
     uint32_t fetchNow = millis();
+    HaMqttPayloads::AircraftSummary mqttSummary;
 
     if (!ac.isNull()) {
         for (JsonObject plane : ac) {
@@ -2662,9 +2771,32 @@ static bool fetchAdsb() {
             copySquawkCode(plane, dst.squawk, sizeof(dst.squawk));
             formatAltitude(plane, dst.alt, sizeof(dst.alt));
             formatVerticalRate(dst.verticalRateFpm, dst.vsi, sizeof(dst.vsi));
+
+            float summaryDistanceKm = trackDistanceKm(
+                static_cast<float>(centerLat),
+                static_cast<float>(centerLon),
+                dst.lat,
+                dst.lon
+            );
+            if (!mqttSummary.hasNearest ||
+                summaryDistanceKm < mqttSummary.distanceKm) {
+                mqttSummary.hasNearest = true;
+                mqttSummary.distanceKm = summaryDistanceKm;
+                strlcpy(mqttSummary.callsign, dst.callsign, sizeof(mqttSummary.callsign));
+                strlcpy(mqttSummary.hex, dst.hex, sizeof(mqttSummary.hex));
+                strlcpy(mqttSummary.type, dst.type, sizeof(mqttSummary.type));
+                float altitudeFt = 0;
+                mqttSummary.hasAltitude =
+                    readJsonFloat(plane, "alt_baro", altitudeFt) ||
+                    readJsonFloat(plane, "alt_geom", altitudeFt);
+                mqttSummary.altitudeFt = altitudeFt;
+                mqttSummary.speedKnots = dst.gsKnots;
+                mqttSummary.verticalRateFpm = dst.verticalRateFpm;
+            }
             fetchedCount++;
         }
     }
+    mqttSummary.count = fetchedCount;
 
     char fetchStatus[24];
     snprintf(fetchStatus, sizeof(fetchStatus), "%u AIRCRAFT", static_cast<unsigned>(fetchedCount));
@@ -2678,6 +2810,7 @@ static bool fetchAdsb() {
     lastFetchText = fetchStatus;
     networkDataDirty = true;
     unlockState();
+    HaMqtt::publishAircraft(mqttSummary);
 
     RADAR_LOGD("[adsb] %s\n", fetchStatus);
     snprintf(
@@ -3768,6 +3901,72 @@ static bool shouldDrawRadarFrame(uint32_t now) {
     return dirty || (hasAircraft && now - previousDrawMs >= RADAR_DRAW_INTERVAL_MS);
 }
 
+static void feedWatchdogMapProgress(const RadarMap::LoadProgress &, void *) {
+    AppWatchdog::feed();
+}
+
+// Brightness is baked into the cached map views, so applying a new value
+// means re-fetching every view. Runs on the network task; the radar falls
+// back to the plain background per view until it reloads.
+static void serviceMapBrightnessReload() {
+    if (!mapBrightnessReloadPending) {
+        return;
+    }
+    mapBrightnessReloadPending = false;
+    if (!mapRuntimeReady) {
+        return;
+    }
+    lockState();
+    double centerLat = config.lat;
+    double centerLon = config.lon;
+    String apiKey = config.stadiaApiKey;
+    uint8_t brightness = config.mapBrightness;
+    unlockState();
+    RADAR_LOGI("[mqtt] reloading map views brightness=%u\n",
+               static_cast<unsigned>(brightness));
+    for (size_t i = 0; i < RANGE_COUNT; i++) {
+        AppWatchdog::feed();
+        RadarMap::background.fetchStadia(
+            centerLat,
+            centerLon,
+            ranges[i].outerKm,
+            RADAR_RADIUS,
+            apiKey,
+            brightness,
+            i,
+            feedWatchdogMapProgress,
+            nullptr
+        );
+    }
+    lockState();
+    networkDataDirty = true;
+    unlockState();
+}
+
+static void serviceMqttStatus(uint32_t now) {
+    if (!HaMqtt::connected()) {
+        return;
+    }
+    bool requested = HaMqtt::consumeStatusRequest();
+    bool due = now - lastMqttStatusMs >= MQTT_STATUS_INTERVAL_MS;
+    if (!requested && !mqttStatusDirty && !due) {
+        return;
+    }
+    mqttStatusDirty = false;
+    lastMqttStatusMs = now;
+
+    HaMqttPayloads::StatusSummary status;
+    status.rssi = WiFi.RSSI();
+    strlcpy(status.ip, WiFi.localIP().toString().c_str(), sizeof(status.ip));
+    status.uptimeS = millis() / 1000;
+    lockState();
+    status.rangeLabel = rangeLabel();
+    status.mapBrightness = config.mapBrightness;
+    unlockState();
+    status.displayOn = backlightOn;
+    HaMqtt::publishStatus(status);
+}
+
 static void networkTaskMain(void *) {
     RADAR_LOGD("[task] network start core=%d\n", xPortGetCoreID());
     AppWatchdog::subscribeCurrentTask("plane-net");
@@ -3777,6 +3976,7 @@ static void networkTaskMain(void *) {
         uint32_t now = millis();
         serviceWifiReconnect(now);
         if (WiFi.status() == WL_CONNECTED) {
+            HaMqtt::ensureStarted();
             bool fetchNow = false;
             lockState();
             if (forceAdsbFetch) {
@@ -3790,6 +3990,8 @@ static void networkTaskMain(void *) {
             }
 
             serviceRouteLookup();
+            serviceMapBrightnessReload();
+            serviceMqttStatus(now);
         }
 
         AppWatchdog::feed();
@@ -4026,6 +4228,26 @@ void setup() {
                config.showLabelVerticalRate,
                static_cast<unsigned>(config.aircraftSymbolStyle));
 
+    for (size_t i = 0; i < RANGE_COUNT; i++) {
+        mqttRangeOptions[i] = config.miles ? ranges[i].miLabel : ranges[i].kmLabel;
+    }
+    HaMqtt::Settings mqttSettings;
+    mqttSettings.enabled = config.mqttEnabled;
+    mqttSettings.host = config.mqttHost;
+    mqttSettings.port = config.mqttPort;
+    mqttSettings.username = config.mqttUser;
+    mqttSettings.password = config.mqttPass;
+    HaMqttPayloads::DeviceMeta mqttMeta;
+    mqttMeta.model = screen.modelName();
+    mqttMeta.configurationUrl = "http://plane-radar.local/";
+    HaMqttPayloads::EntityLimits mqttLimits;
+    mqttLimits.rangeOptions = mqttRangeOptions;
+    mqttLimits.rangeOptionCount = RANGE_COUNT;
+    mqttLimits.brightnessMin = MAP_BRIGHTNESS_MIN;
+    mqttLimits.brightnessMax = 100;
+    mqttLimits.brightnessStep = 5;
+    HaMqtt::configure(mqttSettings, mqttMeta, mqttLimits, handleMqttCommand);
+
     if (!config.configured) {
         setBootStageDetails(BOOT_WIFI, "NO SAVED WIFI CONFIGURATION", "SETUP PORTAL REQUIRED");
         setBootStage(BOOT_WIFI, BootStatus::Skip);
@@ -4068,11 +4290,24 @@ void setup() {
             setBootStage(BOOT_SERVICES, BootStatus::Running);
             char serviceIpLine[88];
             snprintf(serviceIpLine, sizeof(serviceIpLine), "HTTP SERVER / %s:80", WiFi.localIP().toString().c_str());
+            char mqttLine[88];
+            if (config.mqttEnabled && config.mqttHost.length() > 0) {
+                snprintf(
+                    mqttLine,
+                    sizeof(mqttLine),
+                    "MQTT / %s:%u",
+                    config.mqttHost.c_str(),
+                    static_cast<unsigned>(config.mqttPort)
+                );
+            } else {
+                strlcpy(mqttLine, "MQTT / OFF", sizeof(mqttLine));
+            }
             setBootStageDetails(
                 BOOT_SERVICES,
                 serviceIpLine,
                 "MDNS / PLANE-RADAR.LOCAL",
-                "BACKGROUND NETWORK TASK / CORE 0"
+                "BACKGROUND NETWORK TASK / CORE 0",
+                mqttLine
             );
             setBootStage(BOOT_SERVICES, BootStatus::Ok);
             preloadMapCache();
@@ -4137,10 +4372,35 @@ void setup() {
     AppWatchdog::feed();
 }
 
+static void serviceBacklight() {
+    bool targetOn = backlightTarget != 0;
+    if (targetOn == backlightOn) {
+        return;
+    }
+    if (!screen.setBacklight(targetOn)) {
+        RADAR_LOGE("[display] backlight change failed\n");
+        backlightTarget = backlightOn ? 1 : 0;
+        return;
+    }
+    backlightOn = targetOn;
+    mqttStatusDirty = true;
+    RADAR_LOGI("[display] backlight %s\n", targetOn ? "on" : "off");
+}
+
 void loop() {
     AppWatchdog::feed();
     server.handleClient();
-    handleTouch();
+    serviceBacklight();
+    if (backlightOn && !backlightWakeAwaitingRelease) {
+        handleTouch();
+    } else if (screen.readTouch(nullptr, nullptr)) {
+        // A touch on a dark screen only wakes it; swallow the gesture until
+        // the finger lifts.
+        backlightTarget = 1;
+        backlightWakeAwaitingRelease = true;
+    } else {
+        backlightWakeAwaitingRelease = false;
+    }
 
     uint32_t now = millis();
     if (shouldDrawRadarFrame(now)) {

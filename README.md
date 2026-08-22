@@ -199,8 +199,33 @@ appears as `/dev/ttyACM*` or `/dev/ttyUSB*`; the user may need access to the
   the setup portal;
 - boot setup window: hold the screen during startup to force the setup portal;
 - screenshot endpoint: `/screenshot` and `/screenshot.bmp`;
+- optional Home Assistant integration over MQTT: discovery-published aircraft
+  sensors plus range, map brightness, and display power controls;
 - conservative RGB LCD settings for this panel: `13 MHz` PCLK and `800 * 10`
   RGB bounce buffer.
+
+## Home Assistant Integration
+
+The firmware can publish to an MQTT broker and appears in Home Assistant
+automatically through MQTT discovery. Enable it in the setup portal under
+**Home Assistant** and enter the broker host, port, and credentials, for
+example a Mosquitto add-on user.
+
+The `Big Plane Radar` device provides:
+
+- sensors: aircraft count, nearest aircraft callsign with hex, type, speed,
+  and vertical-rate attributes, nearest distance, nearest altitude, Wi-Fi
+  RSSI, and IP address;
+- controls: radar range preset, map brightness, and display on/off.
+
+Aircraft sensors update with every ADS-B refresh, about every 5 seconds.
+Changing the map brightness re-downloads the four cached map views, so the
+map background may disappear for a few seconds while it reloads. Touching a
+switched-off display turns it back on without triggering the touched control.
+
+Without MQTT, a `generic` camera entity pointed at
+`http://plane-radar.local/screenshot.bmp` still provides a live dashboard
+image of the screen.
 
 ## Symbol Legend
 
@@ -413,7 +438,8 @@ Use the merged binary for browser flashing.
 The setup page is available at `http://192.168.4.1` while connected to
 `PlaneRadar-Setup`, or at `http://plane-radar.local` after the board joins your
 normal Wi-Fi. It controls the radar center, units, airport/runway selection,
-aircraft symbol style, label fields, map brightness, and map background.
+aircraft symbol style, label fields, map brightness, map background, and the
+Home Assistant MQTT connection.
 
 `Use browser location` fills the coordinate fields using the browser's precise
 location. Browsers allow geolocation only from a secure context, while the ESP

@@ -6,6 +6,7 @@ LABEL_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-label-layout-tests"
 SCROLL_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-aircraft-list-scroll-tests"
 ROUTE_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-route-plausibility-tests"
 ROUTE_JSON_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-route-json-tests"
+HA_MQTT_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-ha-mqtt-payload-tests"
 
 c++ \
   -std=c++17 \
@@ -56,3 +57,16 @@ c++ \
   -o "$ROUTE_JSON_OUTPUT"
 
 "$ROUTE_JSON_OUTPUT"
+
+c++ \
+  -std=c++17 \
+  -O2 \
+  -Wall \
+  -Wextra \
+  -Werror \
+  -I"$PROJECT_DIR/src" \
+  -I"$PROJECT_DIR/lib/ArduinoJson/src" \
+  "$PROJECT_DIR/tests/test_ha_mqtt_payloads.cpp" \
+  -o "$HA_MQTT_OUTPUT"
+
+"$HA_MQTT_OUTPUT"
