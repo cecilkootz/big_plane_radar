@@ -9,6 +9,7 @@ ROUTE_JSON_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-route-json-tests"
 HA_MQTT_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-ha-mqtt-payload-tests"
 BATTERY_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-battery-gauge-tests"
 AIRPORT_LOOKUP_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-airport-lookup-tests"
+MAP_GEOMETRY_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-map-geometry-tests"
 
 c++ \
   -std=c++17 \
@@ -96,3 +97,15 @@ c++ \
   -o "$AIRPORT_LOOKUP_OUTPUT"
 
 "$AIRPORT_LOOKUP_OUTPUT"
+
+c++ \
+  -std=c++17 \
+  -O2 \
+  -Wall \
+  -Wextra \
+  -Werror \
+  -I"$PROJECT_DIR/src" \
+  "$PROJECT_DIR/tests/test_map_geometry.cpp" \
+  -o "$MAP_GEOMETRY_OUTPUT"
+
+"$MAP_GEOMETRY_OUTPUT"
