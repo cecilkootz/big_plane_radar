@@ -7,7 +7,13 @@
 using RadarRoute::corridorDistanceKm;
 using RadarRoute::GeoPoint;
 using RadarRoute::kRouteCorridorToleranceKm;
+using RadarRoute::kRouteDirectionStrikeLimit;
+using RadarRoute::kRouteRecoverySampleLimit;
+using RadarRoute::routeDirectionIsPlausible;
 using RadarRoute::routeIsPlausible;
+using RadarRoute::RouteSample;
+using RadarRoute::RouteVerdict;
+using RadarRoute::updateRouteVerdict;
 
 #define CHECK(condition) do { \
     if (!(condition)) { \
@@ -105,6 +111,108 @@ static void testToleranceSeparatesRealFromStale() {
     CHECK(kRouteCorridorToleranceKm < corridorDistanceKm(kJfk, kSan, kTampa));
 }
 
+// Mid-country on the JFK->SAN corridor. Bearing to SAN is ~246 deg, to JFK
+// ~66 deg, so the two legs are unambiguous.
+static constexpr GeoPoint kKansas{38.5f, -98.0f};
+
+static RouteSample enRouteSample(GeoPoint position, float trackDeg) {
+    RouteSample sample;
+    sample.position = position;
+    sample.trackDeg = trackDeg;
+    sample.gsKnots = 450.0f;
+    sample.hasTrack = true;
+    return sample;
+}
+
+// A route can pass the corridor check while the aircraft flies the opposite
+// leg; the track exposes that.
+static void testReversedLegContradictsTrack() {
+    CHECK(routeDirectionIsPlausible(kJfk, kSan, kKansas, 250.0f));
+    CHECK(routeDirectionIsPlausible(kJfk, kSan, kKansas, 180.0f));
+    CHECK(!routeDirectionIsPlausible(kJfk, kSan, kKansas, 66.0f));
+    CHECK(!routeDirectionIsPlausible(kJfk, kSan, kKansas, 90.0f));
+}
+
+// Terminal maneuvering points anywhere, so the track says nothing near the
+// airports.
+static void testDirectionSkippedNearEndpoints() {
+    constexpr GeoPoint nearSan{33.3f, -116.2f};
+    CHECK(corridorDistanceKm(kSan, kSan, nearSan) < 150.0f);
+    CHECK(routeDirectionIsPlausible(kJfk, kSan, nearSan, 66.0f));
+    constexpr GeoPoint nearJfk{40.9f, -74.5f};
+    CHECK(routeDirectionIsPlausible(kJfk, kSan, nearJfk, 66.0f));
+}
+
+static void testCorridorBreachRejectsImmediately() {
+    RouteVerdict verdict;
+    CHECK(updateRouteVerdict(verdict, kJfk, kSan, enRouteSample(kTampa, 200.0f)));
+    CHECK(verdict.rejected);
+}
+
+static void testContradictingTrackNeedsConsecutiveStrikes() {
+    RouteVerdict verdict;
+    for (uint8_t i = 1; i < kRouteDirectionStrikeLimit; i++) {
+        CHECK(!updateRouteVerdict(verdict, kJfk, kSan, enRouteSample(kKansas, 66.0f)));
+        CHECK(!verdict.rejected);
+    }
+    CHECK(updateRouteVerdict(verdict, kJfk, kSan, enRouteSample(kKansas, 66.0f)));
+    CHECK(verdict.rejected);
+}
+
+// One toward-destination sample resets the strikes: turns and vectors are
+// transient.
+static void testTowardSampleResetsStrikes() {
+    RouteVerdict verdict;
+    for (uint8_t i = 1; i < kRouteDirectionStrikeLimit; i++) {
+        updateRouteVerdict(verdict, kJfk, kSan, enRouteSample(kKansas, 66.0f));
+    }
+    CHECK(!updateRouteVerdict(verdict, kJfk, kSan, enRouteSample(kKansas, 250.0f)));
+    for (uint8_t i = 1; i < kRouteDirectionStrikeLimit; i++) {
+        CHECK(!updateRouteVerdict(verdict, kJfk, kSan, enRouteSample(kKansas, 66.0f)));
+        CHECK(!verdict.rejected);
+    }
+}
+
+// Slow or trackless samples carry no directional evidence.
+static void testDirectionNeedsSpeedAndTrack() {
+    RouteVerdict verdict;
+    RouteSample slow = enRouteSample(kKansas, 66.0f);
+    slow.gsKnots = 40.0f;
+    RouteSample trackless = enRouteSample(kKansas, 66.0f);
+    trackless.hasTrack = false;
+    for (int i = 0; i < 5; i++) {
+        CHECK(!updateRouteVerdict(verdict, kJfk, kSan, slow));
+        CHECK(!updateRouteVerdict(verdict, kJfk, kSan, trackless));
+    }
+    CHECK(!verdict.rejected);
+}
+
+// A glitched position must not suppress a good route for the whole flight:
+// consecutive samples well inside the corridor lift the rejection.
+static void testRejectionRecoversOnConsistentGoodSamples() {
+    RouteVerdict verdict;
+    updateRouteVerdict(verdict, kJfk, kSan, enRouteSample(kTampa, 250.0f));
+    CHECK(verdict.rejected);
+    for (uint8_t i = 1; i < kRouteRecoverySampleLimit; i++) {
+        CHECK(!updateRouteVerdict(verdict, kJfk, kSan, enRouteSample(kDenver, 250.0f)));
+        CHECK(verdict.rejected);
+    }
+    CHECK(updateRouteVerdict(verdict, kJfk, kSan, enRouteSample(kDenver, 250.0f)));
+    CHECK(!verdict.rejected);
+}
+
+// An unusable sample is not evidence in either direction.
+static void testUnusableSampleLeavesVerdictAlone() {
+    RouteVerdict verdict;
+    updateRouteVerdict(verdict, kJfk, kSan, enRouteSample(kTampa, 250.0f));
+    CHECK(verdict.rejected);
+    CHECK(!updateRouteVerdict(verdict, kJfk, kSan, enRouteSample(GeoPoint{0.0f, 0.0f}, 250.0f)));
+    CHECK(verdict.rejected);
+    RouteVerdict fresh;
+    CHECK(!updateRouteVerdict(fresh, GeoPoint{0.0f, 0.0f}, kSan, enRouteSample(kTampa, 250.0f)));
+    CHECK(!fresh.rejected);
+}
+
 int main() {
     testPointOnCorridorIsClose();
     testStaleRouteIsRejected();
@@ -115,6 +223,14 @@ int main() {
     testUnknownCoordinatesStayPlausible();
     testNonPositiveToleranceDisablesGate();
     testToleranceSeparatesRealFromStale();
+    testReversedLegContradictsTrack();
+    testDirectionSkippedNearEndpoints();
+    testCorridorBreachRejectsImmediately();
+    testContradictingTrackNeedsConsecutiveStrikes();
+    testTowardSampleResetsStrikes();
+    testDirectionNeedsSpeedAndTrack();
+    testRejectionRecoversOnConsistentGoodSamples();
+    testUnusableSampleLeavesVerdictAlone();
     printf("route plausibility tests passed\n");
     return 0;
 }
