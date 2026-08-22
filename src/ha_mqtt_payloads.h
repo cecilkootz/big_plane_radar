@@ -31,6 +31,7 @@ struct Identity {
 struct DeviceMeta {
     const char *model = "";
     const char *configurationUrl = nullptr;
+    bool hasBatteryTelemetry = false;
 };
 
 struct EntityLimits {
@@ -61,6 +62,8 @@ struct StatusSummary {
     const char *rangeLabel = "";
     uint8_t mapBrightness = 100;
     bool displayOn = true;
+    int batteryPercent = -1;  // < 0: no battery reading yet (or unsupported)
+    bool onBattery = false;
 };
 
 // The efuse MAC packs mac[0] in the low byte; bytes 3..5 are the
@@ -122,11 +125,19 @@ inline void buildStatusJson(const StatusSummary &status, JsonDocument &doc) {
     doc["range"] = status.rangeLabel;
     doc["map_brightness"] = status.mapBrightness;
     doc["display"] = status.displayOn ? "ON" : "OFF";
+    if (status.batteryPercent >= 0) {
+        doc["battery_percent"] = status.batteryPercent;
+        doc["on_battery"] = status.onBattery ? "ON" : "OFF";
+    } else {
+        doc["battery_percent"] = nullptr;
+        doc["on_battery"] = nullptr;
+    }
 }
 
 struct DiscoveryEntityDef {
     const char *component;
     const char *key;
+    bool requiresBatteryTelemetry = false;
 };
 
 inline constexpr DiscoveryEntityDef DISCOVERY_ENTITIES[] = {
@@ -139,6 +150,8 @@ inline constexpr DiscoveryEntityDef DISCOVERY_ENTITIES[] = {
     {"select", "radar_range"},
     {"number", "map_brightness"},
     {"switch", "display"},
+    {"sensor", "battery", true},
+    {"binary_sensor", "on_battery", true},
 };
 inline constexpr size_t DISCOVERY_ENTITY_COUNT =
     sizeof(DISCOVERY_ENTITIES) / sizeof(DISCOVERY_ENTITIES[0]);
@@ -154,6 +167,7 @@ inline bool buildDiscovery(
 ) {
     if (index >= DISCOVERY_ENTITY_COUNT) return false;
     const DiscoveryEntityDef &def = DISCOVERY_ENTITIES[index];
+    if (def.requiresBatteryTelemetry && !meta.hasBatteryTelemetry) return false;
     snprintf(topicOut, topicOutLen, "homeassistant/%s/%s/%s/config",
              def.component, identity.deviceId, def.key);
 
@@ -268,6 +282,24 @@ inline bool buildDiscovery(
         doc["payload_on"] = "ON";
         doc["payload_off"] = "OFF";
         doc["icon"] = "mdi:monitor";
+        break;
+    case 9:
+        doc["name"] = "Battery";
+        doc["state_topic"] = statusTopic;
+        doc["value_template"] = "{{ value_json.battery_percent }}";
+        doc["unit_of_measurement"] = "%";
+        doc["device_class"] = "battery";
+        doc["state_class"] = "measurement";
+        doc["entity_category"] = "diagnostic";
+        break;
+    case 10:
+        doc["name"] = "On battery";
+        doc["state_topic"] = statusTopic;
+        doc["value_template"] = "{{ value_json.on_battery }}";
+        doc["payload_on"] = "ON";
+        doc["payload_off"] = "OFF";
+        doc["entity_category"] = "diagnostic";
+        doc["icon"] = "mdi:power-plug-off";
         break;
     default:
         return false;

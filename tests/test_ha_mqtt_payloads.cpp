@@ -99,6 +99,8 @@ static void testStatusJson() {
     status.rangeLabel = "10km";
     status.mapBrightness = 80;
     status.displayOn = false;
+    status.batteryPercent = 65;
+    status.onBattery = true;
 
     JsonDocument doc;
     buildStatusJson(status, doc);
@@ -108,6 +110,20 @@ static void testStatusJson() {
     CHECK(strcmp(doc["range"].as<const char *>(), "10km") == 0);
     CHECK(doc["map_brightness"].as<int>() == 80);
     CHECK(strcmp(doc["display"].as<const char *>(), "OFF") == 0);
+    CHECK(doc["battery_percent"].as<int>() == 65);
+    CHECK(strcmp(doc["on_battery"].as<const char *>(), "ON") == 0);
+}
+
+// No battery reading yet (or no battery hardware): the keys must exist as
+// null so the battery templates never hit an undefined variable.
+static void testStatusJsonBatteryUnknown() {
+    StatusSummary status;
+    JsonDocument doc;
+    buildStatusJson(status, doc);
+    for (const char *key : {"battery_percent", "on_battery"}) {
+        CHECK(!doc[key].isUnbound());
+        CHECK(doc[key].isNull());
+    }
 }
 
 static void testDiscoveryCommonFields() {
@@ -115,6 +131,7 @@ static void testDiscoveryCommonFields() {
     DeviceMeta meta;
     meta.model = "ESP32-S3-Touch-LCD-7B";
     meta.configurationUrl = "http://plane-radar.local/";
+    meta.hasBatteryTelemetry = true;
     EntityLimits limits = makeTestLimits();
 
     for (size_t i = 0; i < DISCOVERY_ENTITY_COUNT; i++) {
@@ -185,13 +202,64 @@ static void testDiscoveryControls() {
                  "{{ value_json.display }}") == 0);
 }
 
+static void testDiscoveryBattery() {
+    Identity identity = makeTestIdentity();
+    DeviceMeta meta;
+    meta.model = "ESP32-S3-Touch-LCD-7B";
+    meta.hasBatteryTelemetry = true;
+    EntityLimits limits = makeTestLimits();
+
+    JsonDocument percent;
+    char topic[TOPIC_MAX];
+    CHECK(buildDiscovery(identity, meta, limits, 9, topic, sizeof(topic), percent));
+    CHECK(strcmp(topic,
+                 "homeassistant/sensor/plane_radar_a1b2c3/battery/config") == 0);
+    CHECK(strcmp(percent["value_template"].as<const char *>(),
+                 "{{ value_json.battery_percent }}") == 0);
+    CHECK(strcmp(percent["unit_of_measurement"].as<const char *>(), "%") == 0);
+    CHECK(strcmp(percent["device_class"].as<const char *>(), "battery") == 0);
+    CHECK(strcmp(percent["entity_category"].as<const char *>(), "diagnostic") == 0);
+
+    JsonDocument onBattery;
+    CHECK(buildDiscovery(identity, meta, limits, 10, topic, sizeof(topic), onBattery));
+    CHECK(strcmp(topic,
+                 "homeassistant/binary_sensor/plane_radar_a1b2c3/on_battery/config") == 0);
+    CHECK(strcmp(onBattery["value_template"].as<const char *>(),
+                 "{{ value_json.on_battery }}") == 0);
+    // Payloads must match what buildStatusJson publishes.
+    CHECK(strcmp(onBattery["payload_on"].as<const char *>(), "ON") == 0);
+    CHECK(strcmp(onBattery["payload_off"].as<const char *>(), "OFF") == 0);
+    CHECK(strcmp(onBattery["entity_category"].as<const char *>(), "diagnostic") == 0);
+}
+
+// LCD-7 has no battery telemetry: battery entities must not be discovered,
+// while every other entity still is.
+static void testDiscoveryBatteryGating() {
+    Identity identity = makeTestIdentity();
+    DeviceMeta meta;
+    meta.model = "ESP32-S3-Touch-LCD-7";
+    EntityLimits limits = makeTestLimits();
+
+    for (size_t i = 0; i < DISCOVERY_ENTITY_COUNT; i++) {
+        JsonDocument doc;
+        char topic[TOPIC_MAX];
+        bool built = buildDiscovery(identity, meta, limits, i, topic, sizeof(topic), doc);
+        CHECK(built == !DISCOVERY_ENTITIES[i].requiresBatteryTelemetry);
+    }
+    CHECK(DISCOVERY_ENTITIES[9].requiresBatteryTelemetry);
+    CHECK(DISCOVERY_ENTITIES[10].requiresBatteryTelemetry);
+}
+
 int main() {
     testIdentityFormatting();
     testAircraftJsonWithNearest();
     testAircraftJsonEmptySky();
     testStatusJson();
+    testStatusJsonBatteryUnknown();
     testDiscoveryCommonFields();
     testDiscoveryControls();
+    testDiscoveryBattery();
+    testDiscoveryBatteryGating();
     printf("ha mqtt payload tests passed\n");
     return 0;
 }

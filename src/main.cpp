@@ -305,7 +305,7 @@ static volatile bool networkDataDirty = false;
 static BatteryGauge::PowerStateTracker batteryTracker;
 static volatile bool runningOnBattery = false;
 static bool batteryStatusValid = false;
-static int batteryDisplayPercent = -1;
+static volatile int batteryDisplayPercent = -1;
 static uint32_t lastBatterySampleMs = 0;
 static bool touchWasDown = false;
 static uint32_t touchDownMs = 0;
@@ -4012,6 +4012,7 @@ static void serviceBatteryMonitor(uint32_t now) {
     if (!wasValid ||
         onBattery != wasOnBattery ||
         batteryDisplayPercent != previousPercent) {
+        mqttStatusDirty = true;
         lockState();
         if (!portalActive) {
             networkDataDirty = true;
@@ -4083,6 +4084,8 @@ static void serviceMqttStatus(uint32_t now) {
     status.mapBrightness = config.mapBrightness;
     unlockState();
     status.displayOn = backlightOn;
+    status.batteryPercent = batteryDisplayPercent;
+    status.onBattery = runningOnBattery;
     HaMqtt::publishStatus(status);
 }
 
@@ -4362,6 +4365,7 @@ void setup() {
     HaMqttPayloads::DeviceMeta mqttMeta;
     mqttMeta.model = screen.modelName();
     mqttMeta.configurationUrl = "http://plane-radar.local/";
+    mqttMeta.hasBatteryTelemetry = screen.supportsBatteryTelemetry();
     HaMqttPayloads::EntityLimits mqttLimits;
     mqttLimits.rangeOptions = mqttRangeOptions;
     mqttLimits.rangeOptionCount = RANGE_COUNT;
