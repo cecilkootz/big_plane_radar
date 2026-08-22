@@ -6,6 +6,7 @@ LABEL_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-label-layout-tests"
 SCROLL_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-aircraft-list-scroll-tests"
 ROUTE_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-route-plausibility-tests"
 ROUTE_JSON_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-route-json-tests"
+BATTERY_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-battery-gauge-tests"
 AIRPORT_LOOKUP_OUTPUT="${TMPDIR:-/tmp}/big-plane-radar-airport-lookup-tests"
 
 c++ \
@@ -57,6 +58,18 @@ c++ \
   -o "$ROUTE_JSON_OUTPUT"
 
 "$ROUTE_JSON_OUTPUT"
+
+c++ \
+  -std=c++17 \
+  -O2 \
+  -Wall \
+  -Wextra \
+  -Werror \
+  -I"$PROJECT_DIR/src" \
+  "$PROJECT_DIR/tests/test_battery_gauge.cpp" \
+  -o "$BATTERY_OUTPUT"
+
+"$BATTERY_OUTPUT"
 
 c++ \
   -std=c++17 \

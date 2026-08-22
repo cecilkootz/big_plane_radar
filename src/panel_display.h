@@ -69,6 +69,9 @@ public:
     Model model() const { return _model; }
     const char *modelName() const;
     uint32_t pixelClockHz() const;
+    bool supportsBatteryTelemetry() const;
+    bool readBatteryAdcCounts(uint16_t *counts);
+    bool setBacklightBrightnessPercent(uint8_t percent);
     int getRotation() const { return 0; }
     void startWrite() {}
     void endWrite() {}
