@@ -8,6 +8,7 @@ using RadarRoute::buildFlightRouteFilter;
 using RadarRoute::GeoPoint;
 using RadarRoute::kRouteCorridorToleranceKm;
 using RadarRoute::readAirportCoordinate;
+using RadarRoute::resolveAirportCoordinate;
 using RadarRoute::routeIsPlausible;
 
 #define CHECK(condition) do { \
@@ -92,10 +93,79 @@ static void testMissingCoordinatesAreNotUsable() {
     CHECK(routeIsPlausible(point, point, kLivePosition, kRouteCorridorToleranceKm));
 }
 
+static JsonObject parseAirport(JsonDocument &doc, const char *json) {
+    CHECK(!deserializeJson(doc, json));
+    return doc.as<JsonObject>();
+}
+
+// The corridor check must survive an ADSBdb response that omits coordinates:
+// the compiled-in catalog resolves them from the airport codes.
+static void testCatalogResolvesMissingCoordinates() {
+    JsonDocument icaoDoc;
+    GeoPoint viaIcao = resolveAirportCoordinate(
+        parseAirport(icaoDoc, "{\"icao_code\":\"KJFK\",\"iata_code\":\"JFK\"}")
+    );
+    CHECK(RadarRoute::isUsableCoordinate(viaIcao));
+    CHECK(fabsf(viaIcao.lat - 40.6394f) < 0.01f);
+    CHECK(fabsf(viaIcao.lon - (-73.7793f)) < 0.01f);
+
+    JsonDocument iataDoc;
+    GeoPoint viaIata = resolveAirportCoordinate(
+        parseAirport(iataDoc, "{\"iata_code\":\"SAN\"}")
+    );
+    CHECK(RadarRoute::isUsableCoordinate(viaIata));
+    CHECK(fabsf(viaIata.lat - 32.7336f) < 0.01f);
+    CHECK(fabsf(viaIata.lon - (-117.19f)) < 0.01f);
+}
+
+// The catalog also overrides response coordinates when it knows the airport,
+// so a wrong ADSBdb airport row cannot poison the check.
+static void testCatalogOverridesResponseCoordinates() {
+    JsonDocument doc;
+    GeoPoint point = resolveAirportCoordinate(parseAirport(
+        doc,
+        "{\"icao_code\":\"KJFK\",\"latitude\":12.0,\"longitude\":34.0}"
+    ));
+    CHECK(fabsf(point.lat - 40.6394f) < 0.01f);
+    CHECK(fabsf(point.lon - (-73.7793f)) < 0.01f);
+}
+
+// Airports outside the catalog (small fields) keep using response coordinates.
+static void testUnknownAirportFallsBackToResponse() {
+    JsonDocument doc;
+    GeoPoint point = resolveAirportCoordinate(parseAirport(
+        doc,
+        "{\"icao_code\":\"XXXX\",\"iata_code\":\"XXX\","
+        "\"latitude\":10.5,\"longitude\":20.25}"
+    ));
+    CHECK(RadarRoute::isUsableCoordinate(point));
+    CHECK(fabsf(point.lat - 10.5f) < 0.001f);
+    CHECK(fabsf(point.lon - 20.25f) < 0.001f);
+
+    JsonDocument bareDoc;
+    GeoPoint bare = resolveAirportCoordinate(
+        parseAirport(bareDoc, "{\"icao_code\":\"XXXX\"}")
+    );
+    CHECK(!RadarRoute::isUsableCoordinate(bare));
+}
+
+// Dropping icao_code from the filter would silently defeat catalog resolution.
+static void testFilterKeepsIcaoCode() {
+    JsonDocument originDoc;
+    JsonObject origin = parseEndpoint(originDoc, "origin");
+    CHECK(strcmp(origin["icao_code"].as<const char *>(), "KJFK") == 0);
+    GeoPoint point = resolveAirportCoordinate(origin);
+    CHECK(fabsf(point.lat - 40.6394f) < 0.01f);
+}
+
 int main() {
     testFilterKeepsCoordinates();
     testReportedDefectIsRejectedEndToEnd();
     testMissingCoordinatesAreNotUsable();
+    testCatalogResolvesMissingCoordinates();
+    testCatalogOverridesResponseCoordinates();
+    testUnknownAirportFallsBackToResponse();
+    testFilterKeepsIcaoCode();
     printf("route json tests passed\n");
     return 0;
 }

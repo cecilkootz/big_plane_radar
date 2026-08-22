@@ -17,6 +17,8 @@
 #include "build_diagnostics.h"
 #include "app_watchdog.h"
 #include "airport_catalog.h"
+#include "airport_lookup.h"
+#include "battery_gauge.h"
 #include "ha_mqtt.h"
 #include "label_layout.h"
 #include "map_background.h"
@@ -85,10 +87,19 @@ static constexpr uint16_t AIRPORT_RADIUS_MAX_KM = 500;
 static constexpr uint32_t WIFI_CONNECT_ATTEMPT_MS = 15000;
 static constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 12000;
 static constexpr uint32_t ADSB_FETCH_INTERVAL_MS = 5000;
+static constexpr uint32_t ADSB_FETCH_ON_BATTERY_INTERVAL_MS = 15000;
 static constexpr uint32_t RADAR_DRAW_INTERVAL_MS = 0;
+static constexpr uint32_t RADAR_DRAW_ON_BATTERY_INTERVAL_MS = 250;
+static constexpr uint32_t BATTERY_SAMPLE_INTERVAL_MS = 2000;
+static constexpr uint32_t BATTERY_PRIME_SAMPLE_INTERVAL_MS = 250;
+static constexpr uint8_t BACKLIGHT_EXTERNAL_PERCENT = 100;
+static constexpr uint8_t BACKLIGHT_ON_BATTERY_PERCENT = 60;
 static constexpr uint32_t AIRCRAFT_EXTRAPOLATE_MAX_MS = 30000;
 static constexpr uint32_t ROUTE_LOOKUP_INTERVAL_MS = 5000;
 static constexpr uint32_t ROUTE_LOOKUP_RETRY_MS = 600000;
+// A timeout or rate-limit response says nothing about the route, so retry it
+// within the cache entry's lifetime instead of waiting out the no-data delay.
+static constexpr uint32_t ROUTE_LOOKUP_TRANSIENT_RETRY_MS = 15000;
 static constexpr uint32_t ROUTE_CACHE_STALE_MS = 60000;
 static constexpr uint32_t ROUTE_HTTP_TIMEOUT_MS = 2500;
 static constexpr uint32_t BOOT_SETUP_WINDOW_MS = 4000;
@@ -229,12 +240,16 @@ struct RouteCacheEntry {
     char destinationIata[4] = {};
     char originCity[ROUTE_CITY_MAX_LEN] = {};
     char destinationCity[ROUTE_CITY_MAX_LEN] = {};
+    RadarRoute::GeoPoint origin;
+    RadarRoute::GeoPoint destination;
+    RadarRoute::RouteVerdict verdict;
     uint32_t lastSeenMs = 0;
     uint32_t lastLookupMs = 0;
     bool active = false;
     bool hasRoute = false;
+    bool hasEndpoints = false;
     bool lookupDone = false;
-    bool routeRejected = false;
+    bool lookupFailedTransiently = false;
 };
 
 struct RouteEndpointCoordinates {
@@ -287,6 +302,11 @@ static StaticSemaphore_t stateMutexStorage;
 static SemaphoreHandle_t stateMutex = nullptr;
 static TaskHandle_t networkTaskHandle = nullptr;
 static volatile bool networkDataDirty = false;
+static BatteryGauge::PowerStateTracker batteryTracker;
+static volatile bool runningOnBattery = false;
+static bool batteryStatusValid = false;
+static int batteryDisplayPercent = -1;
+static uint32_t lastBatterySampleMs = 0;
 static bool touchWasDown = false;
 static uint32_t touchDownMs = 0;
 static uint32_t touchLastContactMs = 0;
@@ -346,7 +366,7 @@ static float trackDistanceKm(float latA, float lonA, float latB, float lonB) {
 }
 
 static float airportCoordinate(int32_t valueE5) {
-    return static_cast<float>(valueE5) / 100000.0f;
+    return RadarAirports::degreesFromE5(valueE5);
 }
 
 static String normalizeAirportIcao(String value) {
@@ -361,24 +381,6 @@ static String normalizeAirportIcao(String value) {
         }
     }
     return normalized.length() >= 2 ? normalized : String();
-}
-
-static const AirportCatalogEntry *findAirportByIcao(const char *icao) {
-    if (icao == nullptr || icao[0] == '\0') return nullptr;
-    size_t low = 0;
-    size_t high = kAirportCatalogCount;
-    while (low < high) {
-        size_t middle = low + (high - low) / 2;
-        int comparison = strcmp(kAirportCatalog[middle].icao, icao);
-        if (comparison < 0) {
-            low = middle + 1;
-        } else if (comparison > 0) {
-            high = middle;
-        } else {
-            return &kAirportCatalog[middle];
-        }
-    }
-    return nullptr;
 }
 
 static size_t selectAirportsFor(
@@ -397,7 +399,7 @@ static size_t selectAirportsFor(
 
     if (mode == AirportSelectionMode::Manual) {
         String normalized = normalizeAirportIcao(manualIcao);
-        const AirportCatalogEntry *airport = findAirportByIcao(normalized.c_str());
+        const AirportCatalogEntry *airport = RadarAirports::findByIcao(normalized.c_str());
         if (airport == nullptr) return 0;
         out[0].airport = airport;
         out[0].distanceKm = trackDistanceKm(
@@ -2254,17 +2256,47 @@ static void pruneRouteCache(uint32_t now) {
     }
 }
 
+static RadarRoute::RouteSample routeSampleFromAircraft(const Aircraft &item) {
+    RadarRoute::RouteSample sample;
+    sample.position.lat = item.lat;
+    sample.position.lon = item.lon;
+    sample.trackDeg = item.trackDeg;
+    sample.gsKnots = item.gsKnots;
+    sample.hasTrack = item.hasTrack;
+    return sample;
+}
+
+// Every fetch delivers a fresh position, so each one re-judges the cached
+// route: a route accepted before the aircraft had a position gets checked as
+// soon as one arrives, and a rejection caused by a glitched sample heals.
 static void syncRouteCacheFromAircraft(uint32_t now) {
     for (size_t i = 0; i < aircraftCount; i++) {
-        if (aircraft[i].hasFlight) {
-            touchRouteCacheEntry(aircraft[i].callsign, now);
+        if (!aircraft[i].hasFlight) continue;
+        RouteCacheEntry *entry = touchRouteCacheEntry(aircraft[i].callsign, now);
+        if (entry == nullptr || !entry->hasRoute || !entry->hasEndpoints) continue;
+        if (RadarRoute::updateRouteVerdict(
+                entry->verdict,
+                entry->origin,
+                entry->destination,
+                routeSampleFromAircraft(aircraft[i])
+            )) {
+            networkDataDirty = true;
+            RADAR_LOGD("[route] callsign=%s %s %s-%s\n",
+                       entry->callsign,
+                       entry->verdict.rejected ? "rejected" : "restored",
+                       entry->originIata,
+                       entry->destinationIata);
         }
     }
 
     pruneRouteCache(now);
 }
 
-static bool lookupRouteForCallsign(
+// Only a definitive answer may suppress retries: a timeout, rate limit, or
+// truncated response leaves the route unknown rather than absent.
+enum class RouteLookupStatus : uint8_t { Found, NoRoute, TransientFailure };
+
+static RouteLookupStatus lookupRouteForCallsign(
     RouteCacheEntry &entry,
     RouteEndpointCoordinates &coordinates
 ) {
@@ -2275,13 +2307,16 @@ static bool lookupRouteForCallsign(
     client.setInsecure();
     HTTPClient http;
     if (!http.begin(client, url)) {
-        return false;
+        return RouteLookupStatus::TransientFailure;
     }
     http.setTimeout(ROUTE_HTTP_TIMEOUT_MS);
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
         http.end();
-        return false;
+        if (code == HTTP_CODE_BAD_REQUEST || code == HTTP_CODE_NOT_FOUND) {
+            return RouteLookupStatus::NoRoute;
+        }
+        return RouteLookupStatus::TransientFailure;
     }
 
     JsonDocument filter;
@@ -2294,12 +2329,12 @@ static bool lookupRouteForCallsign(
     );
     http.end();
     if (err) {
-        return false;
+        return RouteLookupStatus::TransientFailure;
     }
 
     JsonObject route = doc["response"]["flightroute"].as<JsonObject>();
     if (route.isNull()) {
-        return false;
+        return RouteLookupStatus::NoRoute;
     }
 
     char origin[4] = {};
@@ -2308,22 +2343,21 @@ static bool lookupRouteForCallsign(
     JsonObject destinationAirport = route["destination"].as<JsonObject>();
     if (!copyAirportIata(originAirport, origin, sizeof(origin)) ||
         !copyAirportIata(destinationAirport, destination, sizeof(destination))) {
-        return false;
+        return RouteLookupStatus::NoRoute;
     }
 
     strlcpy(entry.originIata, origin, sizeof(entry.originIata));
     strlcpy(entry.destinationIata, destination, sizeof(entry.destinationIata));
     copyRouteCity(originAirport, entry.originCity, sizeof(entry.originCity));
     copyRouteCity(destinationAirport, entry.destinationCity, sizeof(entry.destinationCity));
-    coordinates.origin = RadarRoute::readAirportCoordinate(originAirport);
-    coordinates.destination = RadarRoute::readAirportCoordinate(destinationAirport);
-    entry.hasRoute = true;
-    return true;
+    coordinates.origin = RadarRoute::resolveAirportCoordinate(originAirport);
+    coordinates.destination = RadarRoute::resolveAirportCoordinate(destinationAirport);
+    return RouteLookupStatus::Found;
 }
 
-static bool findAircraftPositionLocked(
+static bool findAircraftSampleLocked(
     const char *normalizedCallsign,
-    RadarRoute::GeoPoint &out
+    RadarRoute::RouteSample &out
 ) {
     for (size_t i = 0; i < aircraftCount; i++) {
         if (!aircraft[i].hasFlight) continue;
@@ -2332,8 +2366,7 @@ static bool findAircraftPositionLocked(
             continue;
         }
         if (strcmp(normalized, normalizedCallsign) != 0) continue;
-        out.lat = aircraft[i].lat;
-        out.lon = aircraft[i].lon;
+        out = routeSampleFromAircraft(aircraft[i]);
         return true;
     }
     return false;
@@ -2359,9 +2392,14 @@ static bool serviceRouteLookup() {
 
     for (size_t i = 0; i < MAX_ROUTE_CACHE; i++) {
         RouteCacheEntry &entry = routeCache[i];
-        if (!entry.active || entry.hasRoute || entry.routeRejected) continue;
+        if (!entry.active || entry.hasRoute) continue;
         if (now - entry.lastSeenMs > ROUTE_CACHE_STALE_MS) continue;
-        if (entry.lookupDone && now - entry.lastLookupMs < ROUTE_LOOKUP_RETRY_MS) continue;
+        if (entry.lookupDone) {
+            uint32_t retryMs = entry.lookupFailedTransiently
+                ? ROUTE_LOOKUP_TRANSIENT_RETRY_MS
+                : ROUTE_LOOKUP_RETRY_MS;
+            if (now - entry.lastLookupMs < retryMs) continue;
+        }
 
         lastRouteLookupMs = now;
         entry.lastLookupMs = now;
@@ -2377,39 +2415,13 @@ static bool serviceRouteLookup() {
     }
 
     RouteEndpointCoordinates coordinates;
-    bool ok = lookupRouteForCallsign(lookupEntry, coordinates);
+    RouteLookupStatus status = lookupRouteForCallsign(lookupEntry, coordinates);
 
     lockState();
     RouteCacheEntry *entry = findRouteCacheEntry(lookupEntry.callsign);
     if (entry != nullptr) {
-        bool rejected = false;
-        if (ok) {
-            // The callsign route table is a static schedule, so a recycled
-            // flight number can describe a route this aircraft is not flying.
-            RadarRoute::GeoPoint position;
-            if (findAircraftPositionLocked(entry->callsign, position) &&
-                !RadarRoute::routeIsPlausible(
-                    coordinates.origin,
-                    coordinates.destination,
-                    position,
-                    RadarRoute::kRouteCorridorToleranceKm
-                )) {
-                rejected = true;
-                entry->routeRejected = true;
-                RADAR_LOGD(
-                    "[route] callsign=%s rejected %s-%s: %.0fkm off corridor\n",
-                    entry->callsign,
-                    lookupEntry.originIata,
-                    lookupEntry.destinationIata,
-                    static_cast<double>(RadarRoute::corridorDistanceKm(
-                        coordinates.origin,
-                        coordinates.destination,
-                        position
-                    ))
-                );
-            }
-        }
-        if (ok && !rejected) {
+        entry->lookupFailedTransiently = status == RouteLookupStatus::TransientFailure;
+        if (status == RouteLookupStatus::Found) {
             strlcpy(entry->originIata, lookupEntry.originIata, sizeof(entry->originIata));
             strlcpy(entry->destinationIata, lookupEntry.destinationIata, sizeof(entry->destinationIata));
             strlcpy(entry->originCity, lookupEntry.originCity, sizeof(entry->originCity));
@@ -2428,21 +2440,47 @@ static bool serviceRouteLookup() {
                 sizeof(entry->destinationCity),
                 now
             );
+            entry->origin = coordinates.origin;
+            entry->destination = coordinates.destination;
+            entry->hasEndpoints =
+                RadarRoute::isUsableCoordinate(coordinates.origin) &&
+                RadarRoute::isUsableCoordinate(coordinates.destination);
+            entry->verdict = RadarRoute::RouteVerdict();
             entry->hasRoute = true;
             networkDataDirty = true;
+
+            // The callsign route table is a static schedule, so a recycled
+            // flight number can describe a route this aircraft is not flying.
+            RadarRoute::RouteSample sample;
+            if (entry->hasEndpoints &&
+                findAircraftSampleLocked(entry->callsign, sample) &&
+                RadarRoute::updateRouteVerdict(
+                    entry->verdict, entry->origin, entry->destination, sample
+                )) {
+                RADAR_LOGD(
+                    "[route] callsign=%s rejected %s-%s: %.0fkm off corridor\n",
+                    entry->callsign,
+                    entry->originIata,
+                    entry->destinationIata,
+                    static_cast<double>(RadarRoute::corridorDistanceKm(
+                        entry->origin,
+                        entry->destination,
+                        sample.position
+                    ))
+                );
+            }
         }
-        RADAR_LOGD("[route] callsign=%s ok=%d rejected=%d origin=%s/%s destination=%s/%s\n",
+        RADAR_LOGD("[route] callsign=%s status=%d rejected=%d origin=%s/%s destination=%s/%s\n",
                    entry->callsign,
-                   ok ? 1 : 0,
-                   rejected ? 1 : 0,
+                   static_cast<int>(status),
+                   entry->verdict.rejected ? 1 : 0,
                    entry->originIata,
                    entry->originCity,
                    entry->destinationIata,
                    entry->destinationCity);
-        ok = ok && !rejected;
     }
     unlockState();
-    return ok;
+    return status == RouteLookupStatus::Found;
 }
 
 static const RouteCacheEntry *findRouteCacheEntryIn(
@@ -2525,7 +2563,7 @@ static bool routeLabelForCallsign(
     }
 
     const RouteCacheEntry *entry = findRouteCacheEntryIn(entries, entryCount, normalized);
-    if (entry == nullptr || !entry->hasRoute) {
+    if (entry == nullptr || !entry->hasRoute || entry->verdict.rejected) {
         return false;
     }
 
@@ -3370,6 +3408,38 @@ static void appendTokenIfFits(
 }
 
 template <typename Gfx>
+static void drawBatteryIndicator(Gfx &g) {
+    if (!batteryStatusValid) return;
+    int percent = batteryDisplayPercent;
+    uint16_t level = percent <= 15
+        ? colorPlane
+        : (percent <= 30 ? colorWarn : colorDim);
+    int x = PANEL_X + 12;
+    int y = 9;
+    int w = 26;
+    int h = 14;
+    g.fillRect(x, y, w, 2, colorDim);
+    g.fillRect(x, y + h - 2, w, 2, colorDim);
+    g.fillRect(x, y, 2, h, colorDim);
+    g.fillRect(x + w - 2, y, 2, h, colorDim);
+    g.fillRect(x + w, y + 4, 3, h - 8, colorDim);
+    int fillWidth = (w - 8) * percent / 100;
+    if (fillWidth > 0) {
+        g.fillRect(x + 4, y + 4, fillWidth, h - 8, level);
+    }
+    if (!runningOnBattery) {
+        g.fillRect(x + 9, y + 6, 8, 2, colorText);
+        g.fillRect(x + 12, y + 3, 2, 8, colorText);
+    }
+    char percentText[8];
+    snprintf(percentText, sizeof(percentText), "%d", percent);
+    g.setTextDatum(textdatum_t::top_left);
+    g.setTextSize(2);
+    g.setTextColor(level, colorBg);
+    g.drawString(percentText, x + w + 11, 10);
+}
+
+template <typename Gfx>
 static void drawAircraftList(
     Gfx &g,
     const Aircraft *items,
@@ -3390,6 +3460,7 @@ static void drawAircraftList(
     char rangeTitle[24];
     snprintf(rangeTitle, sizeof(rangeTitle), "RANGE %s", rangeLabel());
     g.drawString(rangeTitle, PANEL_RIGHT, 10);
+    drawBatteryIndicator(g);
 
     int textWidth = PANEL_RIGHT - PANEL_TEXT_X;
     int maxRows = static_cast<int>(panelVisibleRows);
@@ -3898,7 +3969,55 @@ static bool shouldDrawRadarFrame(uint32_t now) {
     uint32_t previousDrawMs = lastDrawMs;
     unlockState();
 
-    return dirty || (hasAircraft && now - previousDrawMs >= RADAR_DRAW_INTERVAL_MS);
+    uint32_t drawInterval = runningOnBattery
+        ? RADAR_DRAW_ON_BATTERY_INTERVAL_MS
+        : RADAR_DRAW_INTERVAL_MS;
+    return dirty || (hasAircraft && now - previousDrawMs >= drawInterval);
+}
+
+static void serviceBatteryMonitor(uint32_t now) {
+    if (!screen.supportsBatteryTelemetry()) return;
+    uint32_t sampleInterval = batteryTracker.primed()
+        ? BATTERY_SAMPLE_INTERVAL_MS
+        : BATTERY_PRIME_SAMPLE_INTERVAL_MS;
+    if (lastBatterySampleMs != 0 && now - lastBatterySampleMs < sampleInterval) {
+        return;
+    }
+    lastBatterySampleMs = now;
+
+    uint16_t counts = 0;
+    if (!screen.readBatteryAdcCounts(&counts)) return;
+    batteryTracker.addSample(BatteryGauge::voltsFromAdcCounts(counts));
+    if (!batteryTracker.primed()) return;
+
+    bool wasValid = batteryStatusValid;
+    bool wasOnBattery = runningOnBattery;
+    int previousPercent = batteryDisplayPercent;
+    batteryStatusValid = true;
+    bool onBattery = batteryTracker.onBattery();
+    batteryDisplayPercent = batteryTracker.displayPercent();
+
+    if (!wasValid || onBattery != wasOnBattery) {
+        runningOnBattery = onBattery;
+        screen.setBacklightBrightnessPercent(
+            onBattery ? BACKLIGHT_ON_BATTERY_PERCENT : BACKLIGHT_EXTERNAL_PERCENT
+        );
+        RADAR_LOGI(
+            "[power] %s v=%.2f soc=%d\n",
+            onBattery ? "on battery" : "external power",
+            batteryTracker.filteredVolts(),
+            batteryDisplayPercent
+        );
+    }
+    if (!wasValid ||
+        onBattery != wasOnBattery ||
+        batteryDisplayPercent != previousPercent) {
+        lockState();
+        if (!portalActive) {
+            networkDataDirty = true;
+        }
+        unlockState();
+    }
 }
 
 static void feedWatchdogMapProgress(const RadarMap::LoadProgress &, void *) {
@@ -3984,7 +4103,10 @@ static void networkTaskMain(void *) {
                 fetchNow = true;
             }
             unlockState();
-            if (fetchNow || now - lastFetchMs >= ADSB_FETCH_INTERVAL_MS) {
+            uint32_t fetchInterval = runningOnBattery
+                ? ADSB_FETCH_ON_BATTERY_INTERVAL_MS
+                : ADSB_FETCH_INTERVAL_MS;
+            if (fetchNow || now - lastFetchMs >= fetchInterval) {
                 fetchAdsb();
                 lastFetchMs = millis();
             }
@@ -4403,6 +4525,7 @@ void loop() {
     }
 
     uint32_t now = millis();
+    serviceBatteryMonitor(now);
     if (shouldDrawRadarFrame(now)) {
         drawRadar();
     }

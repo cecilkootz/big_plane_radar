@@ -113,6 +113,23 @@ static bool write7BRegisterDriver(uint8_t reg, uint8_t value) {
     ) == ESP_OK;
 }
 
+static bool read7BRegisterWord(uint8_t reg, uint16_t &value) {
+    uint8_t data[2] = {};
+    if (i2c_master_write_read_device(
+            I2C_NUM_0,
+            0x24,
+            &reg,
+            sizeof(reg),
+            data,
+            sizeof(data),
+            pdMS_TO_TICKS(100)
+        ) != ESP_OK) {
+        return false;
+    }
+    value = static_cast<uint16_t>(data[0] | (data[1] << 8));
+    return true;
+}
+
 static bool readGt911Dimensions(uint8_t address, uint16_t &width, uint16_t &height) {
     uint8_t product[4] = {};
     uint8_t limits[4] = {};
@@ -511,6 +528,27 @@ uint32_t Canvas::pixelClockHz() const {
     return _model == Model::TouchLcd7B
         ? PLANE_RADAR_RGB_7B_PCLK_HZ
         : PLANE_RADAR_RGB_PCLK_HZ;
+}
+
+bool Canvas::supportsBatteryTelemetry() const {
+    return _model == Model::TouchLcd7B;
+}
+
+bool Canvas::readBatteryAdcCounts(uint16_t *counts) {
+    if (_model != Model::TouchLcd7B || counts == nullptr) {
+        return false;
+    }
+    return read7BRegisterWord(0x06, *counts);
+}
+
+bool Canvas::setBacklightBrightnessPercent(uint8_t percent) {
+    if (_model != Model::TouchLcd7B) {
+        return false;
+    }
+    // Floor keeps the inverted PWM duty away from 100%, which blanks the panel.
+    percent = std::min<uint8_t>(100, std::max<uint8_t>(10, percent));
+    uint8_t duty = static_cast<uint8_t>(100 - percent);
+    return write7BRegisterDriver(0x05, static_cast<uint8_t>(duty * 255 / 100));
 }
 
 uint16_t Canvas::color565(uint8_t r, uint8_t g, uint8_t b) const {

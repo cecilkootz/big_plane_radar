@@ -1,6 +1,7 @@
 #pragma once
 
 #include <math.h>
+#include <stdint.h>
 
 namespace RadarRoute {
 
@@ -8,6 +9,25 @@ namespace RadarRoute {
 // flight number can return a route the aircraft is not flying. Comparing the
 // live position against the origin-destination corridor rejects those.
 static constexpr float kRouteCorridorToleranceKm = 500.0f;
+
+// A rejected route recovers only well inside the corridor, so a position
+// oscillating around the tolerance cannot flap the verdict.
+static constexpr float kRouteRecoveryMarginKm = 100.0f;
+
+// The track direction says nothing near the airports, where terminal
+// maneuvering points anywhere, or at low speed.
+static constexpr float kRouteEndpointSlackKm = 150.0f;
+static constexpr float kRouteMinDirectionSpeedKnots = 80.0f;
+
+// cos(120 deg): beyond this the aircraft is flying away from its claimed
+// destination. En-route weather deviation stays inside 90 deg; a reversed or
+// wrong leg measures near 180 deg.
+static constexpr float kRouteAwayCosineLimit = -0.5f;
+
+// Turns and ATC vectors are transient, so a contradicting track must persist
+// across consecutive samples; recovery needs the same persistence.
+static constexpr uint8_t kRouteDirectionStrikeLimit = 3;
+static constexpr uint8_t kRouteRecoverySampleLimit = 3;
 
 static constexpr float kEarthRadiusKm = 6371.0088f;
 
@@ -112,6 +132,95 @@ inline bool routeIsPlausible(
     if (!isUsableCoordinate(destination)) return true;
     if (!isUsableCoordinate(point)) return true;
     return corridorDistanceKm(origin, destination, point) <= toleranceKm;
+}
+
+// True when the track does not contradict the claimed destination. A route can
+// pass the corridor check while the aircraft flies the opposite leg; the track
+// exposes that. Not applicable near either airport.
+inline bool routeDirectionIsPlausible(
+    GeoPoint origin,
+    GeoPoint destination,
+    GeoPoint point,
+    float trackDeg
+) {
+    if (!isUsableCoordinate(origin)) return true;
+    if (!isUsableCoordinate(destination)) return true;
+    if (!isUsableCoordinate(point)) return true;
+    if (detail::angularDistance(origin, point) * kEarthRadiusKm <
+        kRouteEndpointSlackKm) {
+        return true;
+    }
+    if (detail::angularDistance(destination, point) * kEarthRadiusKm <
+        kRouteEndpointSlackKm) {
+        return true;
+    }
+    float away = detail::toRadians(trackDeg) -
+                 detail::initialBearing(point, destination);
+    return cosf(away) > kRouteAwayCosineLimit;
+}
+
+struct RouteSample {
+    GeoPoint position;
+    float trackDeg = 0;
+    float gsKnots = 0;
+    bool hasTrack = false;
+};
+
+struct RouteVerdict {
+    uint8_t awayStrikes = 0;
+    uint8_t recoveryStreak = 0;
+    bool rejected = false;
+};
+
+// Accumulates evidence across position samples. A corridor breach rejects
+// immediately; a contradicting track needs kRouteDirectionStrikeLimit
+// consecutive samples; kRouteRecoverySampleLimit consecutive good samples well
+// inside the corridor lift a rejection, so one glitched position cannot
+// suppress a good route for the whole flight. Returns true when the rejected
+// flag changed.
+inline bool updateRouteVerdict(
+    RouteVerdict &verdict,
+    GeoPoint origin,
+    GeoPoint destination,
+    const RouteSample &sample
+) {
+    if (!isUsableCoordinate(origin)) return false;
+    if (!isUsableCoordinate(destination)) return false;
+    if (!isUsableCoordinate(sample.position)) return false;
+
+    bool wasRejected = verdict.rejected;
+    float corridorKm = corridorDistanceKm(origin, destination, sample.position);
+    if (corridorKm > kRouteCorridorToleranceKm) {
+        verdict.rejected = true;
+        verdict.awayStrikes = 0;
+        verdict.recoveryStreak = 0;
+        return !wasRejected;
+    }
+
+    bool directionOk =
+        !sample.hasTrack ||
+        sample.gsKnots < kRouteMinDirectionSpeedKnots ||
+        routeDirectionIsPlausible(origin, destination, sample.position, sample.trackDeg);
+    if (!directionOk) {
+        verdict.recoveryStreak = 0;
+        if (verdict.awayStrikes < kRouteDirectionStrikeLimit) {
+            verdict.awayStrikes++;
+        }
+        if (verdict.awayStrikes >= kRouteDirectionStrikeLimit) {
+            verdict.rejected = true;
+        }
+    } else {
+        verdict.awayStrikes = 0;
+        if (verdict.rejected &&
+            corridorKm <= kRouteCorridorToleranceKm - kRouteRecoveryMarginKm) {
+            verdict.recoveryStreak++;
+            if (verdict.recoveryStreak >= kRouteRecoverySampleLimit) {
+                verdict.rejected = false;
+                verdict.recoveryStreak = 0;
+            }
+        }
+    }
+    return verdict.rejected != wasRejected;
 }
 
 }  // namespace RadarRoute
